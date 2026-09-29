@@ -1,0 +1,49 @@
+# Rules for cargo deny check: vulnerabilities, licenses, duplicate crates, crate sources.
+# What breaks if you change it: a new dependency under a license outside the list fails the
+# licenses check — decide whether that license is acceptable before adding it to allow.
+
+[graph]
+# Only the platforms this actually runs on; removing this pulls Windows-only crates in too.
+targets = ["aarch64-apple-darwin"]
+
+[advisories]
+# Known vulnerabilities and yanked versions always fail, as do unmaintained crates.
+yanked = "deny"
+unmaintained = "all"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.93
+# The libfuzzer-sys exception below only applies when checking fuzz/; checking the main program
+# it is always unused, and that does not need warning about every time.
+unused-license-exception = "allow"
+
+[licenses.private]
+# This crate declares no license of its own (publish = false), so it is not checked.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies (fuzz/ pointing back at the main crate) have no version, which does not
+# count as an unconstrained version.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# libfuzzer-sys is NCSA-licensed and used only in the separate fuzz/ crate, never in the service
+# itself. This is a single-crate exception rather than an entry in allow above: adding it to
+# allow would let the main program pull in NCSA-licensed crates too.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.Phylode.gatekeeper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/phylode</string>
+        <string>--config</string>
+        <string>/usr/local/etc/phylode.conf</string>
+    </array>
+
+    <!-- launchd binds port 53 and hands the socket to the service, which runs unprivileged.
+         The two keys under Sockets must match LAUNCHD_UDP_SOCKET / LAUNCHD_TCP_SOCKET in the
+         code; renaming one means renaming both, or launchd hands over nothing and the service
+         falls back to binding the port itself (which needs privileges, and fails). -->
+    <key>Sockets</key>
+    <dict>
+        <key>PhylodeUdp</key>
+        <dict>
+            <key>SockServiceName</key>
+            <string>53</string>
+            <key>SockType</key>
+            <string>dgram</string>
+            <key>SockNodeName</key>
+            <string>127.0.0.1</string>
+        </dict>
+        <key>PhylodeTcp</key>
+        <dict>
+            <key>SockServiceName</key>
+            <string>53</string>
+            <key>SockType</key>
+            <string>stream</string>
+            <key>SockNodeName</key>
+            <string>127.0.0.1</string>
+        </dict>
+    </dict>
+
+    <!-- The service runs as a dedicated unprivileged account, not root. -->
+    <key>UserName</key>
+    <string>_phylode</string>
+    <key>GroupName</key>
+    <string>_phylode</string>
+
+    <!-- Starts at boot with nobody logged in, and restarts automatically on crash. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Without these two lines, a service that fails to start leaves no error message at all —
+         only the fact that it is not running. -->
+    <key>StandardOutPath</key>
+    <string>/var/log/phylode/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/phylode/stderr.log</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- The limit on concurrently open files and connections. launchd defaults the soft limit
+         to 256 (launchctl limit maxfiles), while the service allows 300 in-flight upstream
+         queries plus 10 TCP connections; exhausting it makes accept spin.
+         The program reads the soft limit, so setting only the hard limit has no effect. -->
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+</dict>
+</plist>

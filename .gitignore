@@ -1,0 +1,17 @@
+# === secrets ===
+.env
+.env.*
+*.key
+*.pem
+secrets.*
+config.local.*
+
+# === Rust ===
+/target/
+**/*.rs.bk
+
+# === macOS / editors ===
+.DS_Store
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,42 @@
+[package]
+name = "phylode-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.phylode]
+path = ".."
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blocklist"
+path = "fuzz_targets/blocklist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "upstream"
+path = "fuzz_targets/upstream.rs"
+test = false
+doc = false
+bench = false

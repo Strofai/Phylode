@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.Phylode.blocklist-update</string>
+
+    <!-- Downloads the blocklists once a day. Downloading and validation both happen here; the
+         service itself never fetches anything from the network. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/usr/local/libexec/phylode-update-lists</string>
+        <string>/usr/local/etc/phylode/lists</string>
+    </array>
+
+    <!-- The same unprivileged account as the service: it owns the list directory and cannot
+         write anywhere else. -->
+    <key>UserName</key>
+    <string>_phylode</string>
+    <key>GroupName</key>
+    <string>_phylode</string>
+
+    <!-- Runs once at install and at every boot, or the list would be empty and block nothing on
+         the first day.
+         Then daily at 04:17; a run missed while asleep is caught up when launchd wakes
+         (man launchd.plist), and one missed while powered off is covered by the boot run. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>17</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/phylode/update.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/phylode/update.log</string>
+
+    <!-- A background job: it does not compete with the user for resources. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

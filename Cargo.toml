@@ -1,0 +1,23 @@
+[package]
+name = "phylode"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Strofai/Phylode"
+publish = false
+
+[dependencies]
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+futures-util = "0.3.34"
+hickory-proto = "0.26.3"
+hickory-resolver = { version = "0.26.3", features = ["https-ring", "tls-ring", "rustls-platform-verifier"] }
+hickory-server = "0.26.3"
+raunch = "1.0.1"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "sync", "time", "signal", "macros", "fs", "io-util"] }
+
+# cargo fuzz compiles with --cfg fuzzing; registering it keeps ordinary builds from warning
+# about an unknown cfg.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
