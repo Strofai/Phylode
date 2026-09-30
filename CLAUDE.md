@@ -79,6 +79,9 @@ Run this once before starting work and put the result in the first paragraph of 
   `git log` are contributors.
 - CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, clippy, the tests and
   `cargo deny` on every push and pull request; run the same locally before pushing.
+  `install.yml` runs `deploy/install.sh` and `uninstall.sh` for real on a throwaway macOS
+  runner whenever `src/` or `deploy/` changes — that is where installation gets verified, not
+  on a contributor's own machine.
 
 ## Established facts you can design against
 

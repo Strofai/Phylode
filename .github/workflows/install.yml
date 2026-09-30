@@ -1,0 +1,119 @@
+name: Install test
+
+# Runs deploy/install.sh for real on a throwaway macOS runner and exercises the installed
+# service end to end, then removes it with deploy/uninstall.sh. This is the path the README
+# gives to new users, so it must work on a clean machine.
+
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "deploy/**", "Cargo.toml", "Cargo.lock", ".github/workflows/install.yml"]
+  pull_request:
+    paths: ["src/**", "deploy/**", "Cargo.toml", "Cargo.lock", ".github/workflows/install.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: install-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  install:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+
+      - name: Install
+        run: |
+          start=$(date +%s)
+          sudo ./deploy/install.sh
+          echo "install.sh took $(( $(date +%s) - start ))s, including the first answer"
+
+      - name: Resolves through the service
+        run: |
+          dig @127.0.0.1 apple.com +short | grep -E '^[0-9.]+$'
+          dig @127.0.0.1 apple.com AAAA +tcp +short
+
+      - name: Blocks once the lists have downloaded
+        run: |
+          for _ in $(seq 1 60); do
+            answer=$(dig @127.0.0.1 iadsdk.apple.com +short +time=2 +tries=1 || true)
+            if [ "$answer" = "0.0.0.0" ]; then echo "blocked: iadsdk.apple.com -> 0.0.0.0"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::iadsdk.apple.com was never blocked"
+          phylode status || true
+          sudo tail -40 /var/log/phylode/stderr.log || true
+          exit 1
+
+      - name: Apple hard rules always resolve
+        run: |
+          for host in captive.apple.com api.push.apple.com 1-courier.push.apple.com; do
+            answer=$(dig @127.0.0.1 "$host" +short | tail -1)
+            if [ -z "$answer" ] || [ "$answer" = "0.0.0.0" ]; then
+              echo "::error::$host did not resolve (got '$answer')"; exit 1
+            fi
+            echo "$host -> $answer"
+          done
+
+      - name: allow and block work without sudo
+        run: |
+          phylode allow iadsdk.apple.com
+          allowed=0
+          for _ in $(seq 1 15); do
+            answer=$(dig @127.0.0.1 iadsdk.apple.com +short | tail -1)
+            if [ -n "$answer" ] && [ "$answer" != "0.0.0.0" ]; then echo "allowed: $answer"; allowed=1; break; fi
+            sleep 1
+          done
+          if [ "$allowed" -ne 1 ]; then echo "::error::allow did not take effect"; exit 1; fi
+          phylode block iadsdk.apple.com
+          for _ in $(seq 1 15); do
+            if [ "$(dig @127.0.0.1 iadsdk.apple.com +short)" = "0.0.0.0" ]; then echo "blocked again"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::block did not take effect"; exit 1
+
+      - name: status and report work without sudo
+        run: |
+          phylode status
+          phylode report
+
+      - name: launchd brings the service back after it dies
+        run: |
+          pid=$(pgrep -x phylode)
+          sudo kill -9 "$pid"
+          for _ in $(seq 1 30); do
+            new=$(pgrep -x phylode || true)
+            if [ -n "$new" ] && [ "$new" != "$pid" ] && dig @127.0.0.1 apple.com +short +time=1 +tries=1 | grep -q .; then
+              echo "restarted: pid $pid -> $new"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::the service did not come back"; exit 1
+
+      - name: Uninstall
+        # A negated command (! cmd) never fails a step under set -e, so each check is explicit.
+        run: |
+          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          sudo networksetup -setdnsservers "$service" 127.0.0.1
+          networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'
+          sudo ./deploy/uninstall.sh
+          if pgrep -x phylode; then echo "::error::the service is still running"; exit 1; fi
+          for f in /usr/local/bin/phylode /Library/LaunchDaemons/com.Phylode.gatekeeper.plist \
+                   /Library/LaunchDaemons/com.Phylode.blocklist-update.plist; do
+            if test -e "$f"; then echo "::error::left behind: $f"; exit 1; fi
+          done
+          if networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'; then
+            echo "::error::uninstall left \"$service\" pointing at the removed service"; exit 1
+          fi
+          dig apple.com +short +time=2 | grep -q .
+
+      - name: Service logs
+        if: always()
+        run: sudo tail -60 /var/log/phylode/stderr.log || true
