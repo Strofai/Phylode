@@ -85,7 +85,23 @@ pub enum InstallError {
         ANSWER_WAIT.as_secs()
     )]
     NotAnswering,
+    #[error(
+        "{path} can be changed by an account that is not an administrator, which could then \
+         replace what install puts there and have it run as root or as the service. Nothing \
+         was installed. Make the folder writable only by root or an administrator, then try again"
+    )]
+    UnprotectedDirectory { path: PathBuf },
 }
+
+/// The folders `install` writes into as root, whose contents the boot service or `sudo
+/// phylode` later run. Adding a path to the constants above means adding its folder here.
+const PROTECTED_DIRS: [&str; 5] = [
+    "/usr/local/bin",
+    "/usr/local/etc",
+    "/usr/local/libexec",
+    "/Library/LaunchDaemons",
+    "/var/log",
+];
 
 /// Installs or updates the service: the `_phylode` account, this binary, the configuration
 /// (only if there is none yet), the daily list updater, and the boot service. Waits for the
@@ -94,6 +110,10 @@ pub enum InstallError {
 /// Leaves the Mac's DNS settings alone; that is `on`.
 pub fn install() -> Result<(), InstallError> {
     require_root()?;
+    let admin_gid = directory_id("/Groups/admin", "PrimaryGroupID")?;
+    for dir in PROTECTED_DIRS {
+        require_only_administrators_can_change(Path::new(dir), admin_gid)?;
+    }
 
     step(&format!(
         "Creating the account {SERVICE_USER} (the service runs as this, not root)"
@@ -101,7 +121,6 @@ pub fn install() -> Result<(), InstallError> {
     ensure_service_user()?;
     let service_uid = directory_id(&format!("/Users/{SERVICE_USER}"), "UniqueID")?;
     let service_gid = directory_id(&format!("/Groups/{SERVICE_USER}"), "PrimaryGroupID")?;
-    let admin_gid = directory_id("/Groups/admin", "PrimaryGroupID")?;
 
     step(&format!("Installing the program to {BINARY_PATH}"));
     install_binary()?;
@@ -247,6 +266,66 @@ fn require_root() -> Result<(), InstallError> {
     } else {
         Err(InstallError::NotRoot)
     }
+}
+
+/// Fails unless `dir` (or, if it does not exist yet, the nearest folder above it) and every
+/// folder above that can only be changed by root or an administrator. Administrators can
+/// become root anyway, so only a standard account being able to write there is a risk.
+///
+/// What breaks if you change it: without this, a standard account that can write to, say,
+/// `/usr/local/bin` swaps in its own program and the next `sudo phylode` runs it as root.
+fn require_only_administrators_can_change(dir: &Path, admin_gid: u32) -> Result<(), InstallError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let existing = dir
+        .ancestors()
+        .find(|p| p.exists())
+        .unwrap_or(Path::new("/"));
+    let real = fs::canonicalize(existing).map_err(|source| io_error(existing, source))?;
+    for folder in real.ancestors() {
+        let meta = fs::metadata(folder).map_err(|source| io_error(folder, source))?;
+        let safe = match writers(meta.uid(), meta.gid(), meta.mode(), admin_gid) {
+            Writers::RootOrAdministrators => true,
+            Writers::Owner(uid) => is_administrator(uid)?,
+            Writers::Anyone => false,
+        };
+        if !safe {
+            return Err(InstallError::UnprotectedDirectory {
+                path: folder.to_path_buf(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Who, besides root, can change a folder with this owner, group and mode.
+#[derive(Debug, PartialEq, Eq)]
+enum Writers {
+    RootOrAdministrators,
+    /// Root, administrators, and this owner, who may or may not be an administrator.
+    Owner(u32),
+    /// Every account, or a group other than wheel and admin.
+    Anyone,
+}
+
+fn writers(uid: u32, gid: u32, mode: u32, admin_gid: u32) -> Writers {
+    let group_writable = mode & 0o020 != 0;
+    let world_writable = mode & 0o002 != 0;
+    if world_writable || (group_writable && gid != 0 && gid != admin_gid) {
+        Writers::Anyone
+    } else if uid == 0 {
+        Writers::RootOrAdministrators
+    } else {
+        Writers::Owner(uid)
+    }
+}
+
+fn is_administrator(uid: u32) -> Result<bool, InstallError> {
+    let answer = run(
+        "/usr/bin/dsmemberutil",
+        &["checkmembership", "-u", &uid.to_string(), "-G", "admin"],
+    )?;
+    Ok(answer.trim() == "user is a member of the group")
 }
 
 /// Runs a program and returns its standard output; a non-zero exit is an error carrying the
@@ -480,6 +559,23 @@ mod tests {
         let users = "_www 70\n_phylodeish 250\nroot 0\njohn 501\n";
         let groups = "admin 80\n_something 260\nstaff 20\n";
         assert_eq!(next_system_id(users, groups), Some(261));
+    }
+
+    /// Should change: a folder any account, or an unrelated group, can write is refused, and
+    /// one owned by an ordinary account needs that account checked.
+    /// Should not change: root-owned folders, including admin-group-writable ones such as
+    /// the list folder install itself creates, pass without a lookup.
+    #[test]
+    fn only_root_and_administrators_may_be_able_to_change_an_install_folder() {
+        let admin = 80;
+        assert_eq!(writers(0, 0, 0o755, admin), Writers::RootOrAdministrators);
+        assert_eq!(
+            writers(0, admin, 0o775, admin),
+            Writers::RootOrAdministrators
+        );
+        assert_eq!(writers(501, 20, 0o755, admin), Writers::Owner(501));
+        assert_eq!(writers(0, 0, 0o777, admin), Writers::Anyone);
+        assert_eq!(writers(0, 20, 0o775, admin), Writers::Anyone);
     }
 
     #[test]
