@@ -7,18 +7,18 @@
 //! asks for instead.
 //!
 //! What breaks if you change it: anything added here is published by whoever pastes it.
-//! A new line must be a count, a state or a version, or go through [`redact`].
+//! A new line must be a count, a state or a version, or go through `redact`.
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::config::{Config, UpstreamProtocol};
+use crate::config::{Config, ConfigError, UpstreamProtocol};
 use crate::journal::EventKind;
 
 /// How many of the most recent service events are listed, by time and kind only.
-pub const RECENT_EVENTS: usize = 15;
+const RECENT_EVENTS: usize = 15;
 /// How many lines of the service log are included, after redaction.
-pub const LOG_LINES: usize = 20;
+const LOG_LINES: usize = 20;
 
 /// Everything read from this Mac. Gathering is the caller's job so that rendering, and the
 /// redaction in it, can be tested without a real installation.
@@ -28,7 +28,7 @@ pub struct Facts<'a> {
     pub arch: &'a str,
     /// The configuration, or why it could not be read. The list and event lines are only
     /// printed when it could.
-    pub config: Result<&'a Config, String>,
+    pub config: Result<&'a Config, &'a ConfigError>,
     /// Whether the service answered a health-check query just now.
     pub answering: bool,
     /// Domains loaded from the blocklists, or `None` if they could not be loaded.
@@ -59,11 +59,11 @@ pub fn render(facts: &Facts) -> String {
             render_lists(&mut out, facts);
             render_events(&mut out, &facts.events);
         }
-        Err(reason) => {
+        Err(error) => {
             let _ = writeln!(
                 out,
                 "Configuration: could not be read: {}",
-                redact(reason.as_str())
+                describe_config_error(error)
             );
         }
     }
@@ -173,6 +173,26 @@ fn render_events(out: &mut String, events: &[(String, String)]) {
     }
 }
 
+/// Says what is wrong with the configuration by line and key only.
+///
+/// What breaks if you change it: printing the error as it displays (`to_string`) quotes the
+/// offending line, which is where an internal domain or a private upstream name would be.
+/// The key is safe to print for an invalid value — only recognised keys get that far — but
+/// not for an unrecognised one, which can be any text at all.
+fn describe_config_error(error: &ConfigError) -> String {
+    match error {
+        ConfigError::MissingEquals { line, .. } => format!("line {line} has no equals sign"),
+        ConfigError::UnknownKey { line, .. } => format!("line {line} has an unrecognized key"),
+        ConfigError::BadValue { line, key, .. } => {
+            format!("line {line} has an invalid value for `{key}`")
+        }
+        ConfigError::Io { source, .. } => format!("the file could not be opened ({source})"),
+        ConfigError::BlockTtlTooLong { .. } | ConfigError::NoUpstream | ConfigError::NoListen => {
+            error.to_string()
+        }
+    }
+}
+
 fn count_or_unreadable(count: Option<usize>) -> String {
     count.map_or_else(|| "could not be read".to_string(), |n| n.to_string())
 }
@@ -182,7 +202,7 @@ fn count_or_unreadable(count: Option<usize>) -> String {
 ///
 /// What breaks if you change it: the service log prints the addresses it binds and probes,
 /// and error messages carry file paths; both identify a network or an account.
-pub fn redact(line: &str) -> String {
+fn redact(line: &str) -> String {
     let line = strip_home_folders(line);
     let mut out = String::with_capacity(line.len());
     let mut token = String::new();
@@ -258,6 +278,55 @@ mod tests {
             redact("2026-09-14 20:24:36 Blocklist loaded: 1060000 domains, v0.1.0"),
             "2026-09-14 20:24:36 Blocklist loaded: 1060000 domains, v0.1.0"
         );
+    }
+
+    /// Should change: a configuration that fails to parse is described by line and key, never
+    /// by the text on that line.
+    /// Should not change: the reason (which line, which key) is still there.
+    #[test]
+    fn a_broken_configuration_is_described_without_its_values() {
+        for (text, expected) in [
+            (
+                "upstream = tls 198.51.100.7 private-doh.example.net extra\n",
+                "line 1 has an invalid value for `upstream`",
+            ),
+            ("nas.example.lan\n", "line 1 has no equals sign"),
+            (
+                "office_nas = nas.example.lan\n",
+                "line 1 has an unrecognized key",
+            ),
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            let report = render(&Facts {
+                config: Err(&error),
+                ..facts_without_config()
+            });
+            for secret in [
+                "private-doh",
+                "198.51.100.7",
+                "nas.example.lan",
+                "office_nas",
+            ] {
+                assert!(!report.contains(secret), "{secret} leaked:\n{report}");
+            }
+            assert!(report.contains(expected), "missing {expected:?}:\n{report}");
+        }
+    }
+
+    fn facts_without_config() -> Facts<'static> {
+        Facts {
+            version: "0.1.0",
+            macos: "26.1",
+            arch: "aarch64",
+            config: Err(&ConfigError::NoListen),
+            answering: false,
+            blocklist_domains: None,
+            blocklist_ages: Vec::new(),
+            allowlist_entries: None,
+            user_blocklist_entries: None,
+            events: Vec::new(),
+            log: Err("not read".to_string()),
+        }
     }
 
     #[test]

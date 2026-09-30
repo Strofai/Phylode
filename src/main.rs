@@ -371,7 +371,7 @@ fn age_in_days(path: &Path) -> Option<u64> {
 /// Gathers what `diagnostics::render` prints. Every read is allowed to fail — a broken
 /// installation is exactly when this gets run — and a failure becomes a line, not an exit.
 fn diagnostics(config_path: &Path) -> ExitCode {
-    let config = Config::load(config_path).map_err(|error| error.to_string());
+    let config = Config::load(config_path);
     let macos = std::process::Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
         .output()
@@ -383,7 +383,7 @@ fn diagnostics(config_path: &Path) -> ExitCode {
         version: env!("CARGO_PKG_VERSION"),
         macos: &macos,
         arch: std::env::consts::ARCH,
-        config: config.as_ref().map_err(Clone::clone),
+        config: config.as_ref(),
         answering: false,
         blocklist_domains: None,
         blocklist_ages: Vec::new(),
