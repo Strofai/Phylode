@@ -44,8 +44,8 @@ About 9,100 lines of first-party code, 9 direct dependencies (174 packages in
 `Cargo.lock`), 172 tests.
 
 **Fuzzing**: four entry points (packets from home devices, packets from upstream, the
-blocklist parser, the config parser), under `fuzz/`. The device-facing entry point most
-recently ran 16.78 million cases in 10 minutes with no crashes.
+blocklist parser, the config parser), under `fuzz/`, run by a GitHub Actions workflow. The
+latest run gave each target 10 minutes: 114 million cases in total, no crashes or hangs.
 
 **Not done yet**, in this order: packet-layer validation, macOS sandboxing.
 

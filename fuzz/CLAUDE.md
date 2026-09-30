@@ -9,6 +9,10 @@
   resolvers), `blocklist` and `config`.
 - **A run saturates one core.** Run one target at a time locally, and use the workflow below
   for anything longer than a few minutes.
+- For long runs use the **Fuzz** workflow on GitHub Actions instead
+  (`.github/workflows/fuzz.yml`, manual trigger, `seconds` input per target): all four
+  targets run in parallel, corpora persist between runs, and a crashing input is uploaded
+  as an artifact.
 - `libfuzzer-sys` is NCSA-licensed, which is accepted **for `fuzz/` only**: `deny.toml`
   carries an exception scoped to it, and the main program's license allowlist is unchanged.
   To check licensing under `fuzz/`:
