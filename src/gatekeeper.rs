@@ -5,6 +5,7 @@
 //! logic may live only here — spread into `dns` or `upstream`, a change to resolution
 //! silently changes what gets blocked.
 
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -12,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::cache::{Cache, Cached, Hit};
 use crate::dns::{Answer, Query, RecordType, Responder, Response, Signature};
 use crate::health;
-use crate::journal::{Disposition, EventKind, Journal, Record};
+use crate::journal::{Disposition, EventKind, Journal, Record, USER_ALLOWED};
 use crate::policy::{
     self, Admit, Allowlist, Blocklist, RateLimit, RebindGuard, Rebinding, Verdict,
 };
@@ -188,7 +189,13 @@ impl Gatekeeper {
         })
     }
 
-    fn log(&self, query: &Query, client: IpAddr, disposition: Disposition, reason: &str) {
+    fn log(
+        &self,
+        query: &Query,
+        client: IpAddr,
+        disposition: Disposition,
+        reason: impl Into<Cow<'static, str>>,
+    ) {
         let Some(journal) = self.journal.as_ref() else {
             return;
         };
@@ -198,7 +205,7 @@ impl Gatekeeper {
             name: query.name().to_string(),
             record_type: record_type_name(query.record_type()),
             disposition,
-            reason: reason_for(disposition, reason).to_string(),
+            reason: reason_for(disposition, reason.into()),
         });
     }
 }
@@ -209,9 +216,9 @@ impl Gatekeeper {
 /// What breaks if you change it: without this layer, a discarded answer is journalled as
 /// "rebind + blocklist unavailable, allowing" — a disposition and a reason that contradict
 /// each other, and that line is what a person reads.
-fn reason_for(disposition: Disposition, from_caller: &str) -> &str {
-    match disposition {
-        Disposition::Rebind => "answer pointed into the home network; discarded whole",
+fn reason_for(disposition: Disposition, from_caller: Cow<'static, str>) -> Cow<'static, str> {
+    let own = match disposition {
+        Disposition::Rebind => "answer pointed into the local network; discarded whole",
         Disposition::Failed => "every upstream unreachable and nothing in the cache",
         Disposition::Overloaded => {
             "too many queries in flight upstream; this one was not sent and the cache was empty"
@@ -223,8 +230,9 @@ fn reason_for(disposition: Disposition, from_caller: &str) -> &str {
         Disposition::Blocked
         | Disposition::Allowed
         | Disposition::FailOpen
-        | Disposition::Local => from_caller,
-    }
+        | Disposition::Local => return from_caller,
+    };
+    Cow::Borrowed(own)
 }
 
 /// How a cached answer is shaped on the way back to the device — identical to one arriving
@@ -255,12 +263,13 @@ fn disposition_for(write: CacheWrite) -> Disposition {
     }
 }
 
-fn record_type_name(record_type: RecordType) -> String {
+/// The record type as the journal writes it; only a type without a name costs an allocation.
+fn record_type_name(record_type: RecordType) -> Cow<'static, str> {
     match record_type {
-        RecordType::A => "A".to_string(),
-        RecordType::Aaaa => "AAAA".to_string(),
-        RecordType::Https => "HTTPS".to_string(),
-        RecordType::Other(value) => format!("TYPE{value}"),
+        RecordType::A => Cow::Borrowed("A"),
+        RecordType::Aaaa => Cow::Borrowed("AAAA"),
+        RecordType::Https => Cow::Borrowed("HTTPS"),
+        RecordType::Other(value) => Cow::Owned(format!("TYPE{value}")),
     }
 }
 
@@ -328,51 +337,69 @@ impl Responder for Gatekeeper {
         // An allowlist hit still goes through the forwarding path's own verdict rather than
         // being hardcoded as "allowed" — when every upstream is down, or the answer is
         // dropped by the rebinding defence, the journal has to say what actually happened.
-        if self.allowlist.allows(query.name().as_str()) {
+        let name = query.name().as_str();
+        if self.allowlist.allows(name) {
+            let reason = if Allowlist::hard_allows(name) {
+                APPLE_SERVICE
+            } else {
+                USER_ALLOWED
+            };
             let (response, disposition) = self.forward(query, CacheWrite::Allowed).await;
-            self.log(query, client, disposition, "allowlist");
+            self.log(query, client, disposition, reason);
             return response;
         }
 
-        match self.blocklist.lookup(query.name().as_str()) {
-            Verdict::Blocked => {
-                self.log(query, client, Disposition::Blocked, "blocklist");
-                Response::Blocked {
-                    ttl: self.block_ttl,
-                }
-            }
-            Verdict::Allowed => {
-                let (response, disposition) = self.forward(query, CacheWrite::Allowed).await;
-                // CNAME cloaking: the name itself is not on a list, but its alias points at a
-                // domain that is. Answers coming back out of the cache pass through here too,
-                // so they are re-judged after a list update.
-                if let Response::Answer(records) = &response
-                    && let Some(target) = self.cloaked_target(records)
-                {
-                    self.log(
-                        query,
-                        client,
-                        Disposition::Blocked,
-                        &format!("blocklist (alias points at {target})"),
-                    );
-                    return Response::Blocked {
-                        ttl: self.block_ttl,
-                    };
-                }
-                self.log(query, client, disposition, "");
-                response
-            }
-            Verdict::Unavailable => {
-                let (response, disposition) = self.forward(query, CacheWrite::Forbidden).await;
-                self.log(
-                    query,
-                    client,
-                    disposition,
-                    "blocklist unavailable, allowing",
-                );
-                response
-            }
+        let Some(write) = cache_write_for(self.blocklist.lookup(name)) else {
+            self.log(query, client, Disposition::Blocked, "blocklist");
+            return Response::Blocked {
+                ttl: self.block_ttl,
+            };
+        };
+        let (response, disposition) = self.forward(query, write).await;
+        if write == CacheWrite::Forbidden {
+            self.log(
+                query,
+                client,
+                disposition,
+                "blocklist unavailable, allowing",
+            );
+            return response;
         }
+        // CNAME cloaking: the name itself is not on a list, but its alias points at a domain
+        // that is. Answers coming back out of the cache pass through here too, so they are
+        // re-judged after a list update.
+        if let Response::Answer(records) = &response
+            && let Some(target) = self.cloaked_target(records)
+        {
+            self.log(
+                query,
+                client,
+                Disposition::Blocked,
+                format!("blocklist (alias points at {target})"),
+            );
+            return Response::Blocked {
+                ttl: self.block_ttl,
+            };
+        }
+        self.log(query, client, disposition, "");
+        response
+    }
+}
+
+/// The journal reason for a query answered because an Apple hard rule allows it.
+const APPLE_SERVICE: &str = "Apple service, always allowed";
+
+/// What a blocklist verdict permits for the answer: `None` means block, and a list that is not
+/// loaded forwards without caching.
+///
+/// What breaks if you change it: mapping `Unavailable` to [`CacheWrite::Allowed`] caches the
+/// allows made while nothing was being checked, so those domains stay reachable after the list
+/// comes back.
+fn cache_write_for(verdict: Verdict) -> Option<CacheWrite> {
+    match verdict {
+        Verdict::Blocked => None,
+        Verdict::Allowed => Some(CacheWrite::Allowed),
+        Verdict::Unavailable => Some(CacheWrite::Forbidden),
     }
 }
 
@@ -675,6 +702,44 @@ mod tests {
         assert!(!matches!(reply, Response::Blocked { .. }));
     }
 
+    /// Should change: a domain the user allowed is journalled with the user-allowed reason, and
+    /// an Apple hard rule with its own reason, so the weekly summary lists only the first.
+    /// Should not change: both are answered.
+    #[tokio::test]
+    async fn user_allows_and_apple_hard_rules_are_journalled_apart() {
+        let dir = std::env::temp_dir().join(format!("phylode-allowed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = Journal::start(dir.clone(), 10, crate::journal::LocalZone::utc()).unwrap();
+        let (gatekeeper, cache) = parts_with(Blocklist::new(), Some(journal));
+        gatekeeper.allowlist.load_from_str("shop.example.com\n");
+        let address: IpAddr = "93.184.216.34".parse().unwrap();
+        for name in ["shop.example.com", "captive.apple.com"] {
+            let q = query(name);
+            let records =
+                crate::dns::Records::from_addresses(q.name(), Duration::from_secs(300), &[address]);
+            cache.insert(q.clone(), Cached::Records(records));
+            assert!(matches!(
+                gatekeeper.respond(&q, localhost()).await,
+                Response::Answer(_)
+            ));
+        }
+
+        tokio::time::sleep(crate::journal::FLUSH_INTERVAL * 2).await;
+        let mut written = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            written.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            written.contains("shop.example.com\tA\tallowed\tallowlist\n"),
+            "{written}"
+        );
+        assert!(
+            written.contains("captive.apple.com\tA\tallowed\tApple service, always allowed\n"),
+            "{written}"
+        );
+    }
+
     #[test]
     fn an_unavailable_list_takes_the_cache_forbidden_path() {
         // The heart of the fail-open rule: both branches forward, but with different write
@@ -687,9 +752,12 @@ mod tests {
         assert_eq!(loaded.lookup("example.com"), Verdict::Allowed);
         assert_eq!(loaded.lookup("ads.example.com"), Verdict::Blocked);
 
-        assert_eq!(write_for(Verdict::Allowed), Some(CacheWrite::Allowed));
-        assert_eq!(write_for(Verdict::Unavailable), Some(CacheWrite::Forbidden));
-        assert_eq!(write_for(Verdict::Blocked), None);
+        assert_eq!(cache_write_for(Verdict::Allowed), Some(CacheWrite::Allowed));
+        assert_eq!(
+            cache_write_for(Verdict::Unavailable),
+            Some(CacheWrite::Forbidden)
+        );
+        assert_eq!(cache_write_for(Verdict::Blocked), None);
     }
 
     #[test]
@@ -887,15 +955,21 @@ mod tests {
         // that reuses the caller's reason reads as "rebind + blocklist unavailable,
         // allowing", which looks like the query was allowed.
         assert_eq!(
-            reason_for(Disposition::Rebind, "blocklist unavailable, allowing"),
-            "answer pointed into the home network; discarded whole"
+            reason_for(
+                Disposition::Rebind,
+                "blocklist unavailable, allowing".into()
+            ),
+            "answer pointed into the local network; discarded whole"
         );
         assert_eq!(
-            reason_for(Disposition::Failed, "blocklist unavailable, allowing"),
+            reason_for(
+                Disposition::Failed,
+                "blocklist unavailable, allowing".into()
+            ),
             "every upstream unreachable and nothing in the cache"
         );
         assert!(
-            reason_for(Disposition::Overloaded, "").contains("too many"),
+            reason_for(Disposition::Overloaded, "".into()).contains("too many"),
             "saturation must not be described as the upstream being down"
         );
         // The three decided during the list check keep the caller's reason.
@@ -904,7 +978,7 @@ mod tests {
             Disposition::Allowed,
             Disposition::FailOpen,
         ] {
-            assert_eq!(reason_for(disposition, "blocklist"), "blocklist");
+            assert_eq!(reason_for(disposition, "blocklist".into()), "blocklist");
         }
     }
 
@@ -978,16 +1052,6 @@ mod tests {
             "a rate-limited device that cannot reach captive.apple.com falls back to an \
              unfiltered resolver"
         );
-    }
-
-    /// Extracts the mapping inside `respond` so it can be tested, guarding against anyone
-    /// merging the two branches.
-    fn write_for(verdict: Verdict) -> Option<CacheWrite> {
-        match verdict {
-            Verdict::Blocked => None,
-            Verdict::Allowed => Some(CacheWrite::Allowed),
-            Verdict::Unavailable => Some(CacheWrite::Forbidden),
-        }
     }
 
     /// Should change: with the cache lock seized, the health check probe cannot be answered

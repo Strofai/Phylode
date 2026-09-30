@@ -119,7 +119,9 @@ impl Command {
                 config_path,
                 days: days
                     .parse()
-                    .map_err(|_| format!("days must be a positive integer; got {days}"))?,
+                    .ok()
+                    .filter(|&days: &u32| days > 0)
+                    .ok_or_else(|| format!("days must be a positive integer; got {days}"))?,
             }),
             ["allow", domain] => Ok(Self::Allow {
                 config_path,
@@ -303,11 +305,12 @@ fn weekly_report(config_path: &Path, days: u32) -> ExitCode {
     let Some(config) = load_config(config_path) else {
         return ExitCode::from(2);
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let dates = report::recent_days(now, &local_zone(), days.max(1));
+    // The journal holds nothing older than its retention, so a longer span only adds empty days.
+    let kept = config.journal_retention_days();
+    if days > kept {
+        println!("The journal keeps {kept} days, so this covers the last {kept}.\n");
+    }
+    let dates = report::recent_days(journal::unix_now(), &local_zone(), days.min(kept.max(1)));
     let summary = report::Summary::gather(config.journal_dir(), &dates);
     println!("{}", summary.render());
     let archive = config.journal_dir().join(report::archive::ARCHIVE_DIR);

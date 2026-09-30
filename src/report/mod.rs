@@ -76,6 +76,9 @@ pub struct Summary {
     pub servfail_queries: u64,
     /// Which domains those answers came from.
     pub rebind_by_domain: HashMap<String, u64>,
+    /// Queries answered only because the user allowed the domain with `phylode allow`, by
+    /// domain. Apple's hard rules are not counted.
+    pub user_allowed_by_domain: HashMap<String, u64>,
     pub events: Vec<(String, String, String)>,
     pub unreadable_files: Vec<String>,
 }
@@ -132,9 +135,16 @@ impl Summary {
             let fields: Vec<&str> = line.split('\t').collect();
             // Malformed lines are skipped. We write the journal ourselves, but the disk
             // may still corrupt it.
-            let [_time, client, name, _record_type, disposition, ..] = fields.as_slice() else {
+            let [_time, client, name, _record_type, disposition, rest @ ..] = fields.as_slice()
+            else {
                 continue;
             };
+            if *disposition == "allowed" && rest.first() == Some(&journal::USER_ALLOWED) {
+                *self
+                    .user_allowed_by_domain
+                    .entry((*name).to_string())
+                    .or_default() += 1;
+            }
 
             self.total_queries += 1;
             *self
@@ -385,7 +395,27 @@ impl Summary {
         }
 
         out.push_str("\n4. Domains you allowed this week\n");
-        out.push_str("   (allowed with phylode allow; see the current list with phylode status)\n");
+        if self.user_allowed_by_domain.is_empty() {
+            out.push_str("   None were used (allow one with phylode allow).\n");
+        }
+        match detail {
+            Detail::Full => {
+                for (domain, count) in sorted_desc(&self.user_allowed_by_domain)
+                    .into_iter()
+                    .take(TOP_N)
+                {
+                    out.push_str(&format!("   · {domain}: {count}\n"));
+                }
+            }
+            Detail::Archive if !self.user_allowed_by_domain.is_empty() => {
+                out.push_str(&format!(
+                    "   · Allowed domains used: {} (the names are kept only in the \
+                     10-day detailed journal)\n",
+                    self.user_allowed_by_domain.len()
+                ));
+            }
+            Detail::Archive => {}
+        }
 
         out.push_str(&format!("\n5. Top {TOP_N} most-blocked domains\n"));
         if self.top_blocked.is_empty() {
@@ -502,6 +532,38 @@ mod tests {
         assert_eq!(s.blocked_by_client.get("127.0.0.1"), Some(&2));
         assert_eq!(s.blocked_by_client.get("192.168.0.9"), Some(&1));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: domains the user allowed are listed with their counts in the full
+    /// summary, and only counted in the archive.
+    /// Should not change: Apple's hard rules and ordinary allows are not listed.
+    #[test]
+    fn item_four_lists_the_domains_the_user_allowed() {
+        let dir =
+            std::env::temp_dir().join(format!("phylode-report-{}-allowed", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2026-09-14.tsv"),
+            "2026-09-14 10:00:00\t192.168.0.9\tshop.example.com\tA\tallowed\tallowlist\n\
+             2026-09-14 10:00:01\t192.168.0.9\tshop.example.com\tAAAA\tallowed\tallowlist\n\
+             2026-09-14 10:00:02\t192.168.0.9\tcaptive.apple.com\tA\tallowed\tApple service, always allowed\n\
+             2026-09-14 10:00:03\t192.168.0.9\tnews.example.org\tA\tallowed\t-\n",
+        )
+        .unwrap();
+        let s = Summary::gather(&dir, &one_day());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let full = s.render();
+        let item = &full[full.find("4. Domains").unwrap()..full.find("5. Top").unwrap()];
+        assert!(item.contains("· shop.example.com: 2"), "{item}");
+        assert!(!item.contains("captive.apple.com"), "{item}");
+        assert!(!item.contains("news.example.org"), "{item}");
+
+        let archive = s.render_archive();
+        let item = &archive[archive.find("4. Domains").unwrap()..archive.find("5. Top").unwrap()];
+        assert!(item.contains("Allowed domains used: 1 "), "{item}");
+        assert!(!item.contains("shop.example.com"), "{item}");
     }
 
     #[test]

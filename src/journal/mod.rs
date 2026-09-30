@@ -11,6 +11,7 @@
 mod civil;
 mod writer;
 
+use std::borrow::Cow;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -223,12 +224,17 @@ pub struct Record {
     pub at: SystemTime,
     pub client: IpAddr,
     pub name: String,
-    pub record_type: String,
+    pub record_type: Cow<'static, str>,
     pub disposition: Disposition,
     /// Why it was handled that way — for instance, which list matched. Empty when there is
     /// no reason to give.
-    pub reason: String,
+    pub reason: Cow<'static, str>,
 }
+
+/// The reason written for a query answered because the user allowed it with `phylode allow`.
+/// The weekly summary counts these, so changing it empties that item for journals already
+/// written.
+pub const USER_ALLOWED: &str = "allowlist";
 
 /// What flows through the channel: a query record or a service event.
 #[derive(Clone, Debug)]
@@ -398,9 +404,9 @@ mod tests {
             at: SystemTime::UNIX_EPOCH + Duration::from_secs(1_789_388_676),
             client: "127.0.0.1".parse().unwrap(),
             name: name.to_string(),
-            record_type: "A".to_string(),
+            record_type: "A".into(),
             disposition,
-            reason: String::new(),
+            reason: "".into(),
         }
     }
 
