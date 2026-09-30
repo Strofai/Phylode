@@ -10,12 +10,14 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 
 use thiserror::Error;
 
-use super::{Civil, Entry, LocalZone, format_event, format_line};
+use super::{Civil, Entry, Event, EventKind, LocalZone, format_event, format_line};
 
 /// Directory permissions: the owner (the service account) reads and writes, the group reads,
 /// nobody else gets in. The group is inherited from the parent directory (BSD semantics), and
@@ -56,11 +58,15 @@ pub enum WriterError {
 
 /// Starts the writer thread. Failing to create the directory is an error — it means the
 /// permissions or the path are wrong, and that has to be visible at startup.
+///
+/// `dropped` is the count the answer path keeps of records it could not queue; the writer
+/// turns any increase into a "records dropped" event.
 pub fn spawn(
     receiver: Receiver<Entry>,
     directory: PathBuf,
     retention_days: u32,
     zone: LocalZone,
+    dropped: Arc<AtomicU64>,
 ) -> Result<(), WriterError> {
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -73,15 +79,22 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name("phylode-journal".to_string())
-        .spawn(move || run(receiver, directory, retention_days, zone))
+        .spawn(move || run(receiver, directory, retention_days, zone, dropped))
         .map(|_| ())
         .map_err(|source| WriterError::SpawnThread { source })
 }
 
-fn run(receiver: Receiver<Entry>, directory: PathBuf, retention_days: u32, zone: LocalZone) {
-    let mut state = State::new(directory, zone.clone());
-    let mut last_cleanup_check = SystemTime::now();
+fn run(
+    receiver: Receiver<Entry>,
+    directory: PathBuf,
+    retention_days: u32,
+    zone: LocalZone,
+    dropped: Arc<AtomicU64>,
+) {
+    let mut state = State::new(directory, zone.clone(), dropped);
     let mut cleaner = Cleaner::new(retention_days, zone);
+    cleaner.maybe_clean(&state.directory, SystemTime::now());
+    let mut last_cleanup_check = Instant::now();
 
     loop {
         match receiver.recv_timeout(FLUSH_INTERVAL) {
@@ -104,13 +117,9 @@ fn run(receiver: Receiver<Entry>, directory: PathBuf, retention_days: u32, zone:
             }
         }
 
-        let now = SystemTime::now();
-        if now
-            .duration_since(last_cleanup_check)
-            .is_ok_and(|elapsed| elapsed >= CLEANUP_CHECK_INTERVAL)
-        {
-            last_cleanup_check = now;
-            cleaner.maybe_clean(&state.directory, now);
+        if last_cleanup_check.elapsed() >= CLEANUP_CHECK_INTERVAL {
+            last_cleanup_check = Instant::now();
+            cleaner.maybe_clean(&state.directory, SystemTime::now());
         }
     }
 }
@@ -126,6 +135,9 @@ struct State {
     events: DayFile,
     pending: usize,
     last_flush: Instant,
+    /// Records the answer path could not queue, and how many of those already have an event.
+    dropped: Arc<AtomicU64>,
+    reported_dropped: u64,
 }
 
 /// A writer that rolls over to a new file each day.
@@ -166,7 +178,7 @@ impl DayFile {
 }
 
 impl State {
-    fn new(directory: PathBuf, zone: LocalZone) -> Self {
+    fn new(directory: PathBuf, zone: LocalZone, dropped: Arc<AtomicU64>) -> Self {
         Self {
             directory,
             zone,
@@ -174,6 +186,8 @@ impl State {
             events: DayFile::new("events-"),
             pending: 0,
             last_flush: Instant::now(),
+            dropped,
+            reported_dropped: 0,
         }
     }
 
@@ -216,10 +230,30 @@ impl State {
     }
 
     fn flush(&mut self) {
+        self.note_dropped();
         self.queries.flush();
         self.events.flush();
         self.pending = 0;
         self.last_flush = Instant::now();
+    }
+
+    /// Writes a "records dropped" event for records dropped since the last one. Written here
+    /// rather than sent through the channel, because a full channel is why they were dropped.
+    ///
+    /// What breaks if you change it: item 7 of the weekly summary reads only these events; the
+    /// counter on its own is never seen by anyone.
+    fn note_dropped(&mut self) {
+        let total = self.dropped.load(Ordering::Relaxed);
+        let lost = total.saturating_sub(self.reported_dropped);
+        if lost == 0 {
+            return;
+        }
+        self.reported_dropped = total;
+        self.push(&Entry::Event(Event {
+            at: SystemTime::now(),
+            kind: EventKind::RecordsDropped,
+            detail: format!("{lost} not written; the journal could not keep up"),
+        }));
     }
 }
 
@@ -233,26 +267,22 @@ fn open_day_file(directory: &Path, prefix: &str, date: &str) -> Option<BufWriter
         .map(BufWriter::new)
 }
 
-/// Deletes expired journal files. Scheduled for the middle of the night, because it is heavy
-/// and nobody is using the network then.
+/// Deletes expired journal files once per local day: at startup, then at the first check
+/// after each midnight. Deleting a day's file is one directory listing and one unlink.
 ///
-/// The minute is a fixed random jitter.
+/// What breaks if you change it: tying this to a fixed hour means a Mac that is asleep at
+/// that hour never deletes anything, and the journal outlives the retention it promises.
 struct Cleaner {
     retention_days: u32,
     zone: LocalZone,
-    minute: u32,
     last_cleaned_date: Option<String>,
 }
 
 impl Cleaner {
-    /// The hour cleanup runs. With the `minute` jitter this lands between 03:10 and 03:50.
-    const HOUR: u32 = 3;
-
     fn new(retention_days: u32, zone: LocalZone) -> Self {
         Self {
             retention_days,
             zone,
-            minute: 10 + pseudo_random_minute() % 40,
             last_cleaned_date: None,
         }
     }
@@ -262,12 +292,7 @@ impl Cleaner {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let civil = Civil::from_unix(unix, &self.zone);
-        let today = civil.date_string();
-
-        if civil.hour != Self::HOUR || civil.minute < self.minute {
-            return;
-        }
+        let today = Civil::from_unix(unix, &self.zone).date_string();
         if self.last_cleaned_date.as_deref() == Some(today.as_str()) {
             return;
         }
@@ -306,16 +331,6 @@ fn remove_files_before(directory: &Path, cutoff: &str) {
     }
 }
 
-/// Minute jitter for the cleanup window. This does not need cryptographic randomness; it only
-/// keeps every machine from acting in the same second.
-fn pseudo_random_minute() -> u32 {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    nanos % 40
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,7 +344,95 @@ mod tests {
         State::new(
             PathBuf::from("/phylode-nonexistent-test-path"),
             LocalZone::fixed_hours(8),
+            Arc::new(AtomicU64::new(0)),
         )
+    }
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("phylode-journal-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Should change: records dropped on the answer path become one event with the count,
+    /// and a later flush reports only the new ones.
+    /// Should not change: a flush with nothing dropped writes no event.
+    #[test]
+    fn dropped_records_are_written_as_an_event_with_the_count() {
+        let dir = scratch_dir("dropped");
+        let dropped = Arc::new(AtomicU64::new(0));
+        let mut state = State::new(dir.clone(), LocalZone::fixed_hours(8), Arc::clone(&dropped));
+
+        state.flush();
+        assert!(
+            file_names(&dir).is_empty(),
+            "nothing dropped, nothing written"
+        );
+
+        dropped.store(3, Ordering::Relaxed);
+        state.flush();
+        dropped.store(5, Ordering::Relaxed);
+        state.flush();
+        state.flush();
+
+        let [events] = file_names(&dir).try_into().unwrap();
+        let text = std::fs::read_to_string(dir.join(events)).unwrap();
+        let details: Vec<&str> = text
+            .lines()
+            .map(|line| line.split('\t').nth(2).unwrap())
+            .collect();
+        assert_eq!(
+            details,
+            [
+                "3 not written; the journal could not keep up",
+                "2 not written; the journal could not keep up"
+            ]
+        );
+        assert!(
+            text.lines()
+                .all(|line| line.contains("\trecords-dropped\t"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: expired files are deleted at an ordinary hour (20:24 local), not only in
+    /// a night window a sleeping Mac would miss.
+    /// Should not change: within the same day it runs once; the next day it runs again.
+    #[test]
+    fn expired_files_are_deleted_once_a_day_at_any_hour() {
+        let dir = scratch_dir("cleaner");
+        let zone = LocalZone::fixed_hours(8);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(FIXED_UNIX as u64);
+        let mut cleaner = Cleaner::new(10, zone);
+
+        std::fs::write(dir.join("2026-09-01.tsv"), "x").unwrap();
+        std::fs::write(dir.join("2026-09-14.tsv"), "x").unwrap();
+        cleaner.maybe_clean(&dir, now);
+        assert_eq!(file_names(&dir), ["2026-09-14.tsv"]);
+
+        std::fs::write(dir.join("2026-09-02.tsv"), "x").unwrap();
+        cleaner.maybe_clean(&dir, now + Duration::from_secs(60 * 60));
+        assert_eq!(
+            file_names(&dir),
+            ["2026-09-02.tsv", "2026-09-14.tsv"],
+            "the same day does not clean twice"
+        );
+
+        cleaner.maybe_clean(&dir, now + Duration::from_secs(24 * 60 * 60));
+        assert_eq!(file_names(&dir), ["2026-09-14.tsv"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -379,26 +482,8 @@ mod tests {
     }
 
     #[test]
-    fn the_cleanup_window_always_lands_between_0310_and_0350() {
-        for _ in 0..50 {
-            let cleaner = Cleaner::new(10, LocalZone::fixed_hours(8));
-            assert!(
-                (10..50).contains(&cleaner.minute),
-                "the jitter must land in minutes 10-49; got {}",
-                cleaner.minute
-            );
-        }
-    }
-
-    #[test]
     fn only_files_before_the_cutoff_are_deleted_and_nothing_else_is_touched() {
-        let dir = std::env::temp_dir().join(format!(
-            "phylode-journal-test-{}-{}",
-            std::process::id(),
-            pseudo_random_minute()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = scratch_dir("cutoff");
 
         for date in ["2026-09-01", "2026-09-04", "2026-09-05", "2026-09-14"] {
             std::fs::write(dir.join(format!("{date}.tsv")), "x").unwrap();
@@ -407,14 +492,8 @@ mod tests {
 
         remove_files_before(&dir, "2026-09-04");
 
-        let mut left: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect();
-        left.sort();
         assert_eq!(
-            left,
+            file_names(&dir),
             [
                 "2026-09-04.tsv",
                 "2026-09-05.tsv",

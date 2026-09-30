@@ -258,7 +258,13 @@ impl Journal {
     ) -> Result<Self, WriterError> {
         let (sender, receiver) = sync_channel(CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
-        writer::spawn(receiver, directory, retention_days, zone)?;
+        writer::spawn(
+            receiver,
+            directory,
+            retention_days,
+            zone,
+            Arc::clone(&dropped),
+        )?;
         Ok(Self { sender, dropped })
     }
 
@@ -304,9 +310,10 @@ impl Journal {
         finished.recv_timeout(timeout).is_ok()
     }
 
-    /// How many records have been dropped so far. The weekly summary reports this number —
-    /// dropping records without anyone knowing is worse than dropping them.
-    pub fn dropped(&self) -> u64 {
+    /// How many records have been dropped so far. The writer thread turns this count into
+    /// "records dropped" events, which is how it reaches the weekly summary.
+    #[cfg(test)]
+    fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }
 }
