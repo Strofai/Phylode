@@ -53,8 +53,6 @@ pub enum ExchangeError {
         #[source]
         source: hickory_server::net::NetError,
     },
-    #[error("query name {name} is not a valid domain")]
-    BadName { name: String },
 }
 
 /// Whether the upstream flagged this answer's signature as failing validation.

@@ -27,27 +27,34 @@ const DEFAULT_JOURNAL_RETENTION_DAYS: u32 = 10;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("line {line} has no equals sign: {text}")]
+    #[error("line {line} is not in the form `key = value`: {text}")]
     MissingEquals { line: usize, text: String },
-    #[error("line {line} has an unrecognized key `{key}`")]
+    #[error(
+        "line {line} uses `{key}`, which is not a setting Phylode knows; check the spelling \
+         against the comments in the default configuration"
+    )]
     UnknownKey { line: usize, key: String },
-    #[error("line {line} has an invalid value for `{key}`: {value}")]
+    #[error("line {line} has a value `{key}` cannot use: {value}")]
     BadValue {
         line: usize,
         key: String,
         value: String,
     },
     #[error(
-        "blocked-response TTL is {got:?}, above the {max:?} limit — a larger value makes allowing a domain appear not to work"
+        "block_ttl_secs is {}, above the limit of {} — devices would keep a blocked answer that \
+         long, so allowing a domain would appear not to work",
+        got.as_secs(),
+        max.as_secs()
     )]
     BlockTtlTooLong { got: Duration, max: Duration },
-    #[error("at least one upstream resolver must be configured")]
+    #[error(
+        "no upstream resolver is set; add a line such as `upstream = tls 1.1.1.1 cloudflare-dns.com`"
+    )]
     NoUpstream,
-    #[error("at least one listen address must be configured")]
+    #[error("no listen address is set; add a line such as `listen = 0.0.0.0:53`")]
     NoListen,
-    #[error("could not read configuration file {path}: {source}")]
+    #[error("the file could not be opened: {source}")]
     Io {
-        path: PathBuf,
         #[source]
         source: std::io::Error,
     },
@@ -242,12 +249,10 @@ impl Config {
         &self.served_networks
     }
 
+    /// Reads and validates the file at `path`. The error does not repeat the path; callers
+    /// name the file when they report it.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io { source })?;
         Self::parse(&text)
     }
 

@@ -186,7 +186,7 @@ fn describe_config_error(error: &ConfigError) -> String {
         ConfigError::BadValue { line, key, .. } => {
             format!("line {line} has an invalid value for `{key}`")
         }
-        ConfigError::Io { source, .. } => format!("the file could not be opened ({source})"),
+        ConfigError::Io { source } => format!("the file could not be opened ({source})"),
         ConfigError::BlockTtlTooLong { .. } | ConfigError::NoUpstream | ConfigError::NoListen => {
             error.to_string()
         }

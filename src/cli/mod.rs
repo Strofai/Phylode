@@ -20,12 +20,28 @@ pub enum CliError {
     NotADomain { value: String },
     #[error("the configuration does not set {key}, so there is nowhere to write")]
     MissingPath { key: &'static str },
-    #[error("could not read or write {path}: {source}")]
+    #[error(
+        "this account may not change {}; the lists belong to administrators, so run it from an \
+         administrator account",
+        path.display()
+    )]
+    NotPermitted { path: PathBuf },
+    #[error("could not read or write {}: {source}", path.display())]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
+}
+
+/// A file error, told apart by whether it is a permissions problem the user can act on.
+fn io_error(path: &Path, source: std::io::Error) -> CliError {
+    let path = path.to_path_buf();
+    if source.kind() == std::io::ErrorKind::PermissionDenied {
+        CliError::NotPermitted { path }
+    } else {
+        CliError::Io { path, source }
+    }
 }
 
 /// The result of one command, handed back for the caller to print.
@@ -148,12 +164,7 @@ fn read_entries(path: &Path) -> Result<BTreeSet<String>, CliError> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(source) => {
-            return Err(CliError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
+        Err(source) => return Err(io_error(path, source)),
     };
     Ok(text
         .lines()
@@ -179,22 +190,13 @@ fn write_entries(path: &Path, entries: &BTreeSet<String>) -> Result<(), CliError
         body.push('\n');
     }
 
+    // Every failure names the list itself: the staging file is an implementation detail.
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| CliError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+        std::fs::create_dir_all(parent).map_err(|source| io_error(path, source))?;
     }
-
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, body).map_err(|source| CliError::Io {
-        path: temporary.clone(),
-        source,
-    })?;
-    std::fs::rename(&temporary, path).map_err(|source| CliError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
+    std::fs::write(&temporary, body).map_err(|source| io_error(path, source))?;
+    std::fs::rename(&temporary, path).map_err(|source| io_error(path, source))
 }
 
 #[cfg(test)]
@@ -288,6 +290,35 @@ mod tests {
             normalize("  Shop.Example.COM. ").unwrap(),
             "shop.example.com"
         );
+    }
+
+    /// Should change: a folder this account cannot write gives the "use an administrator
+    /// account" message, naming the list rather than the staging file.
+    /// Should not change: the file is left as it was.
+    #[test]
+    fn a_list_this_account_may_not_change_says_what_to_do() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("locked");
+        let allow_file = dir.join("allow.txt");
+        std::fs::write(&allow_file, "kept.example.com\n").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = allow("shop.example.com", Some(&allow_file), None);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.expect_err("a read-only folder cannot take a new list");
+        assert!(
+            matches!(&error, CliError::NotPermitted { path } if path == &allow_file),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().contains("administrator account"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&allow_file).unwrap(),
+            "kept.example.com\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -67,19 +67,22 @@ pub enum InstallError {
         #[source]
         source: std::io::Error,
     },
-    #[error("`{command}` failed: {stderr}")]
-    Failed { command: String, stderr: String },
-    #[error("could not write {path}: {source}")]
+    #[error("`{command}` failed: {detail}")]
+    Failed { command: String, detail: String },
+    #[error("could not access {path}: {source}")]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("no free system account ID below 500 for {SERVICE_USER}")]
+    #[error(
+        "every system account ID below 500 is taken, so the {SERVICE_USER} account cannot be \
+         created; create it by hand with dscl and run install again"
+    )]
     NoFreeId,
     #[error("could not read the numeric ID of {record} from the directory service")]
     UnknownId { record: String },
-    #[error("could not read the configuration {CONFIG_PATH}: {detail}")]
+    #[error("the configuration {CONFIG_PATH} cannot be used: {detail}")]
     Config { detail: String },
     #[error(
         "the service is installed but did not answer within {} seconds; see {SERVICE_LOG}",
@@ -375,9 +378,14 @@ fn run(program: &str, args: &[&str]) -> Result<String, InstallError> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
+        let said = String::from_utf8_lossy(&output.stderr).trim().to_string();
         Err(InstallError::Failed {
             command: format!("{program} {}", args.join(" ")),
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            detail: if said.is_empty() {
+                format!("it stopped with {} and printed no reason", output.status)
+            } else {
+                said
+            },
         })
     }
 }

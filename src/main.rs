@@ -471,7 +471,10 @@ fn load_config(path: &Path) -> Option<Config> {
     match Config::load(path) {
         Ok(config) => Some(config),
         Err(error) => {
-            eprintln!("Could not read the configuration file: {error}");
+            eprintln!(
+                "Could not use the configuration file {}: {error}",
+                path.display()
+            );
             None
         }
     }
