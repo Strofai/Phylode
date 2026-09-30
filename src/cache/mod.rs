@@ -28,7 +28,7 @@ const FRESH_FLOOR: Duration = Duration::from_secs(1);
 
 /// The longest a negative answer counts as fresh: the low end of RFC 2308's "values of one to
 /// three hours have been found to work well". What breaks if you change it: raise it
-/// and a newly registered domain stays unresolvable at home for that long, with no visible
+/// and a newly registered domain stays unresolvable on the network for that long, with no visible
 /// reason.
 const NEGATIVE_CEILING: Duration = Duration::from_secs(60 * 60);
 
@@ -36,7 +36,7 @@ const NEGATIVE_CEILING: Duration = Duration::from_secs(60 * 60);
 /// (RFC 2308 negative caching).
 ///
 /// SERVFAIL is deliberately absent: that is a failure, not an answer. Cached, a domain whose
-/// name servers have since been fixed would keep failing at home for the cache lifetime.
+/// name servers have since been fixed would keep failing on the network for the cache lifetime.
 #[derive(Clone, Debug)]
 pub enum Cached {
     Records(Records),
@@ -87,7 +87,7 @@ pub enum Hit {
     /// Expired, but not beyond the stale window.
     ///
     /// **Only usable while every upstream is unreachable** — under Strict Privacy that is
-    /// the only way to keep the household online. Using it while the upstreams are healthy
+    /// the only way to keep the network online. Using it while the upstreams are healthy
     /// means serving stale data for no reason at all.
     Stale(Cached),
     /// Nothing usable.

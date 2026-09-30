@@ -115,8 +115,8 @@ impl Conductor {
     /// Tries each upstream in health order and takes the first answer.
     ///
     /// What breaks if you change it: only being **unreachable** counts as a failure for an
-    /// upstream. Counting "this name does not exist" as failure means two typos at home demote
-    /// the primary upstream.
+    /// upstream. Counting "this name does not exist" as failure means two typos on the network
+    /// demote the primary upstream.
     ///
     /// When the in-flight limit is full it returns [`Outcome::Busy`] immediately rather than
     /// queueing — queueing makes the device wait until it times out, and a device that times
@@ -158,7 +158,7 @@ impl Conductor {
     /// Sends one [`Query::liveness`] to each demoted upstream and restores any that answers.
     ///
     /// What breaks if you change it: without this, a demoted upstream is only retried once
-    /// everything ahead of it fails, so after one brief outage of the primary the household
+    /// everything ahead of it fails, so after one brief outage of the primary the network
     /// stays on the backup until the backup breaks too.
     /// This only resets the counter and never increments it — an upstream still down simply
     /// stays demoted, with nothing further to record.
@@ -175,7 +175,7 @@ impl Conductor {
     }
 
     /// Whether every upstream is demoted (at the failure threshold and not yet rescued by a
-    /// reprobe). While this holds, only the cache is keeping the household online.
+    /// reprobe). While this holds, only the cache is keeping the network online.
     pub fn all_demoted(&self) -> bool {
         !self.members.is_empty()
             && self.members.iter().all(|member| {

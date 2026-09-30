@@ -3,7 +3,7 @@
 //!
 //! The startup order is deliberate: bind the listener → start serving immediately → load
 //! the blocklist in the background.
-//! What breaks if you change it: move list loading ahead of serving and the whole household
+//! What breaks if you change it: move list loading ahead of serving and the whole network
 //! waits for a list download to finish before it has working name resolution.
 
 #![forbid(unsafe_code)]

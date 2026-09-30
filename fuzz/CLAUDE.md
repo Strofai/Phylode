@@ -5,7 +5,7 @@
   **`fuzz/corpus/<target>` must come first**: newly generated cases are written to the first
   directory given, and `corpus/` is gitignored. Put `seeds/` first and thousands of
   generated cases land in the repository.
-  The targets are `request` (packets from home devices), `upstream` (packets from upstream
+  The targets are `request` (packets from devices on the network), `upstream` (packets from upstream
   resolvers), `blocklist` and `config`.
 - **A run saturates one core.** Run one target at a time locally, and use the workflow below
   for anything longer than a few minutes.

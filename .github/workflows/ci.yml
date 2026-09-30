@@ -1,7 +1,6 @@
 name: CI
 
-# Documentation-only changes skip CI: runners are billed per minute on a private repository,
-# and nothing here reads those files.
+# Documentation-only changes skip CI: nothing here reads those files.
 on:
   push:
     branches: [main]

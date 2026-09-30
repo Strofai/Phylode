@@ -2,9 +2,9 @@
 //!
 //! It carries versions, states and counts — never a domain someone looked up, a network
 //! address other than loopback, a configured name, or a path under a home folder. The
-//! journal holds a household's browsing history and `phylode status` prints the full
-//! configuration; neither belongs in a public issue, so this is what the bug report form
-//! asks for instead.
+//! journal holds the browsing history of everyone on the network and `phylode status`
+//! prints the full configuration; neither belongs in a public issue, so this is what the bug
+//! report form asks for instead.
 //!
 //! What breaks if you change it: anything added here is published by whoever pastes it.
 //! A new line must be a count, a state or a version, or go through `redact`.
@@ -338,7 +338,7 @@ mod tests {
         assert_eq!(redact("/Users/someone"), "~");
     }
 
-    /// Should change: nothing that identifies the household appears — configured names,
+    /// Should change: nothing that identifies the network appears — configured names,
     /// internal domains, upstream addresses, list paths.
     /// Should not change: the counts and states a maintainer needs are all there.
     #[test]

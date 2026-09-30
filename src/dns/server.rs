@@ -57,7 +57,7 @@ const TCP_RESPONSE_BUFFER: usize = 4;
 /// for a resolver serving one network.
 ///
 /// What breaks if you change it: without a cap, opening many connections exhausts the file
-/// descriptors and UDP stops receiving too. Household queries are almost all UDP; TCP is only
+/// descriptors and UDP stops receiving too. Queries are almost all UDP; TCP is only
 /// used when an answer is truncated, so 10 is plenty. New connections arriving at the cap are
 /// closed immediately and the device retries.
 const MAX_TCP_CONNECTIONS: usize = 10;
@@ -66,8 +66,8 @@ const MAX_TCP_CONNECTIONS: usize = 10;
 /// source: it lets the pool of 10 serve at least three devices.
 ///
 /// What breaks if you change it: without this layer, one compromised device opening 10 idle
-/// connections makes every truncated query in the house fail.
-/// What it cannot cover: one device may hold several IPv6 addresses, and the whole household
+/// connections makes every truncated query on the network fail.
+/// What it cannot cover: one device may hold several IPv6 addresses, and the whole network
 /// shares one prefix, so these cannot be aggregated per prefix.
 const MAX_TCP_PER_SOURCE: usize = 3;
 
@@ -194,7 +194,7 @@ pub async fn serve<R: Responder>(listener: Listener, responder: Arc<R>) -> Resul
 }
 
 /// The accept loop for one TCP listener. It does what the library's own loop does, plus
-/// connection slots (one pool for the household, one per source): at the cap, new connections
+/// connection slots (one pool for the whole network, one per source): at the cap, new connections
 /// are closed rather than queued.
 ///
 /// What breaks if you change it: queries within one connection are handled one at a time with
@@ -242,7 +242,7 @@ async fn serve_tcp<R: Responder>(
     }
 }
 
-/// TCP connection slots: a household-wide total, plus a per-source-address cap.
+/// TCP connection slots: a network-wide total, plus a per-source-address cap.
 struct TcpSlots {
     total: Arc<Semaphore>,
     per_source: usize,
@@ -415,7 +415,7 @@ enum Reply {
 /// The addresses returned for a block: two wildcards nothing can ever connect to.
 ///
 /// What breaks if you change it: pointing these at a real address (an explanation page, say)
-/// makes that machine receive every blocked connection in the house, turning the filter into a
+/// makes that machine receive every blocked connection on the network, turning the filter into a
 /// traffic funnel.
 const BLOCKED_V4: Ipv4Addr = Ipv4Addr::UNSPECIFIED;
 const BLOCKED_V6: Ipv6Addr = Ipv6Addr::UNSPECIFIED;
@@ -801,7 +801,7 @@ mod tests {
         assert_eq!(
             v4.data.to_string(),
             "0.0.0.0",
-            "any other address funnels every blocked connection in the house to that machine"
+            "any other address funnels every blocked connection on the network to that machine"
         );
 
         let v6 = blocked_record(&name, ttl, WireRecordType::AAAA)

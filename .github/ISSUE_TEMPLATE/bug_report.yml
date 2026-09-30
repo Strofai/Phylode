@@ -7,7 +7,7 @@ body:
       value: |
         Security problems should not go here — use private reporting (see SECURITY.md).
         Issues are public. Please do not paste your query journal, `phylode status` or the raw
-        service log: they contain the domains your household looked up, your network addresses
+        service log: they contain the domains people on your network looked up, your network addresses
         and your file paths. `phylode diagnostics` below is written to be safe to share.
   - type: textarea
     id: what

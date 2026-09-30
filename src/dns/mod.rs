@@ -107,8 +107,8 @@ impl Query {
     }
 
     /// The query used to check an upstream is alive: the root NS, which every working resolver
-    /// answers at once from its cache. It carries no household domain, so sending it to any upstream leaks
-    /// nothing about what the house is looking up (product principle 3).
+    /// answers at once from its cache. It carries no domain anyone looked up, so sending it to any upstream
+    /// leaks nothing about what the network is looking up (product principle 3).
     pub fn liveness() -> Self {
         Self {
             name: Name(String::new()),
@@ -281,8 +281,8 @@ impl Records {
 ///
 /// ⚠️ **"This name does not exist" is an answer, not a failure.**
 /// What breaks if you change it: merge negative answers with "unreachable" into one `Err` and
-/// every typo at home returns "the server is broken", while the healthy upstream that answered
-/// correctly gets a failure recorded — two of those and it is demoted.
+/// every typo on the network returns "the server is broken", while the healthy upstream that
+/// answered correctly gets a failure recorded — two of those and it is demoted.
 #[derive(Clone, Debug)]
 pub enum Answer {
     /// Records were returned.

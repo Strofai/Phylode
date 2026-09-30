@@ -1,4 +1,4 @@
-//! Local zones: names that only mean something inside the house are answered locally with
+//! Local zones: names that only mean something inside the network are answered locally with
 //! "no such domain" and never sent upstream.
 //!
 //! Sending them would leak every device's hostname (Apple devices append the router's search
@@ -8,7 +8,7 @@
 //!
 //! What breaks if you change it: this list may contain only names **guaranteed not to exist
 //! on the public internet** (RFC-reserved, or undelegated in the root zone). Add a domain
-//! that really exists and the whole household loses access to it, with no error pointing
+//! that really exists and the whole network loses access to it, with no error pointing
 //! here.
 
 /// Names guaranteed not to exist on the public internet, together with everything beneath
@@ -48,7 +48,7 @@ const LOCAL_ZONES: &[&str] = &[
     "0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.ip6.arpa",
 ];
 
-/// Whether this name only means something inside the house.
+/// Whether this name only means something inside the network.
 ///
 /// Reverse lookups for 172.16/12 and 100.64/10 do not fall on label boundaries, so they are
 /// checked separately.
@@ -78,10 +78,10 @@ fn in_second_octet_range(name: &str, first: &str, range: std::ops::RangeInclusiv
 mod tests {
     use super::*;
 
-    /// Should change: household hostnames and private-address reverse lookups are answered
+    /// Should change: local hostnames and private-address reverse lookups are answered
     /// locally.
     #[test]
-    fn every_household_name_is_recognized() {
+    fn every_internal_name_is_recognized() {
         for name in [
             "printer.local",
             "macbook.router.home",

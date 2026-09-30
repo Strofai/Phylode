@@ -3,7 +3,7 @@
 //!
 //! Why it exists: launchd's `KeepAlive` only checks whether the process is alive. When the
 //! process is alive but stuck answering nothing, the system does nothing at all and the
-//! whole household simply has no internet — **this is the only thing that catches that
+//! whole network simply has no internet — **this is the only thing that catches that
 //! failure**.
 //!
 //! What breaks if you change it: the event must be written to the journal, and given time to

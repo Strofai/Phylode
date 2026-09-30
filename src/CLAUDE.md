@@ -7,18 +7,20 @@
 2. **Never return `REFUSED`, under any circumstances.** Devices retry immediately, causing a
    storm, and then move on to the next resolver in their list — filtering drops to zero on
    the spot. Cloudflare Gateway returns REFUSED for non-A/AAAA types; do not follow suit.
-   Their clients have exactly one resolver configured; a household typically has several.
+   Their clients have exactly one resolver configured; devices on a typical network have several.
 3. **When the list is unavailable, allow — but never cache that allow.** Cached, the domain
    stays reachable for the cache lifetime even after the list recovers.
 4. **"No such domain" and SERVFAIL from an upstream do not mean the upstream is down.**
    `Exchange::query` returns `Answer` (records, name does not exist, no such type); only a
    genuine connection failure is `Err`, and `Conductor` counts failures on `Err` alone.
-   Merge them and every typo in the house produces "the server is broken" while a healthy
+   Merge them and every typo on the network produces "the server is broken" while a healthy
    upstream gets demoted. On SERVFAIL, `Exchange` retries with the CD flag: getting an
    answer means the signature failed to validate (`Signature::Bogus`, report-only); getting
    nothing returns `Answer::ServerFailure`. Neither counts as an upstream failure.
-5. **Over the rate limit, do not respond at all — and still do not return REFUSED.** The
-   loopback address is exempt; the self health check goes through it.
+5. **Over the rate limit, or from outside the networks it serves, do not respond at all —
+   and still do not return REFUSED.** The loopback address is exempt from both; the self
+   health check goes through it. Any answer to an outside source, an error included, makes
+   the Mac usable for reflection attacks (`policy::ServedNetworks`).
 6. **TCP connections are accepted by our own code** (`serve_tcp` in `dns/server.rs`) because
    hickory's TCP path has no total connection cap. When upgrading hickory, re-check whether
    its `handle_tcp` has grown that protection.

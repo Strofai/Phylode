@@ -29,7 +29,7 @@ enum CacheWrite {
     /// The list was checked and confirmed this should not be blocked; the answer may be
     /// remembered.
     Allowed,
-    /// The list is currently unavailable and this allow exists only to keep the household
+    /// The list is currently unavailable and this allow exists only to keep the network
     /// online. **The answer must not be remembered** — cached, the domain would stay
     /// reachable for the cache lifetime even after the list recovers.
     Forbidden,
@@ -144,7 +144,7 @@ impl Gatekeeper {
         let cacheable = write == CacheWrite::Allowed && signature == Signature::NotFlagged;
         match answer {
             Answer::Records(records) => {
-                // Rebinding defence: an upstream answer pointing into the home network is
+                // Rebinding defence: an upstream answer pointing into the local network is
                 // discarded whole. **Never cached**, for the same reason as a fail-open
                 // allow — cached, the domain would keep getting the discarded result for the
                 // cache lifetime even after the exception is configured.
@@ -335,8 +335,8 @@ impl Responder for Gatekeeper {
             return Response::Ignored;
         }
 
-        // Names that only mean something inside the house are answered locally with "does
-        // not exist" rather than sent upstream: leaking household hostnames and private
+        // Names that only mean something inside the network are answered locally with "does
+        // not exist" rather than sent upstream: leaking local hostnames and private
         // address reverse lookups would violate product principle 3. Domains configured as
         // internal exceptions are forwarded as usual.
         if policy::local_zone::is_local(query.name().as_str())
@@ -346,7 +346,7 @@ impl Responder for Gatekeeper {
                 query,
                 client,
                 Disposition::Local,
-                "internal household name; not sent outside",
+                "internal network name; not sent outside",
             );
             return Response::NotFound {
                 ttl: self.block_ttl,
@@ -521,7 +521,7 @@ mod tests {
             let reply = gatekeeper.respond(&query(name), localhost()).await;
             assert!(
                 !matches!(reply, Response::Blocked { .. }),
-                "{name} was blocked — every iPhone in the house would pop up login windows or \
+                "{name} was blocked — every iPhone on the network would pop up login windows or \
                  stop receiving messages"
             );
         }
@@ -620,12 +620,12 @@ mod tests {
         );
     }
 
-    /// Should change: household hostnames and private-address reverse lookups are answered
+    /// Should change: local hostnames and private-address reverse lookups are answered
     /// locally with "does not exist" rather than sent upstream.
     /// Should not change: domains configured as internal exceptions are still forwarded, and
     /// so are public names.
     #[tokio::test]
-    async fn internal_household_names_are_never_sent_upstream() {
+    async fn internal_names_are_never_sent_upstream() {
         let (gatekeeper, _) = parts_full(
             Blocklist::new(),
             None,
@@ -978,7 +978,7 @@ mod tests {
     #[test]
     fn a_discarded_answer_is_still_journalled_as_rebinding_during_a_list_outage() {
         // A list outage means "no filtering"; a rebinding attempt means "someone is
-        // targeting the house". The two differ in severity and must not be merged.
+        // targeting the network". The two differ in severity and must not be merged.
         let (gatekeeper, _) = parts(Blocklist::new());
         let (q, answer) = upstream_answer("evil.example.com", &[ip("192.168.0.1")]);
 

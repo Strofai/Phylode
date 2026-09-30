@@ -16,7 +16,7 @@ use thiserror::Error;
 /// Apple services that must never be blocked under any circumstances.
 ///
 /// Sourced from Apple's enterprise network documentation (support.apple.com/101555):
-/// - `captive.apple.com`: block it and every Apple device in the house repeatedly mistakes
+/// - `captive.apple.com`: block it and every Apple device on the network repeatedly mistakes
 ///   the network for a captive portal, popping up login windows
 /// - `push.apple.com`: block or proxy it and push notifications and iMessage stop working
 /// - `mask` / `mask-h2` / `mask-api.icloud.com`: iCloud Private Relay, which this project

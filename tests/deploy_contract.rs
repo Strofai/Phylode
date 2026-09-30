@@ -2,7 +2,7 @@
 //! socket names, the account it runs as, list paths and resource limits.
 //!
 //! When these disagree **each file looks perfectly fine on its own**, while the symptom is
-//! "installed but nothing in the house resolves" or "installed but nothing is blocked". That is
+//! "installed but nothing on the network resolves" or "installed but nothing is blocked". That is
 //! why a test guards them rather than anyone's memory.
 
 use std::path::PathBuf;

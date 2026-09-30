@@ -34,7 +34,7 @@ pub enum Disposition {
     Blocked,
     /// Checked against the list and allowed.
     Allowed,
-    /// The list was unavailable, so the query was allowed to keep the household online.
+    /// The list was unavailable, so the query was allowed to keep the network online.
     /// **This category must stay visible** — the weekly summary has to be able to say
     /// "there was no protection during this window".
     FailOpen,
@@ -52,12 +52,12 @@ pub enum Disposition {
     /// **This category must be countable** — a week or two of these decides whether to
     /// start enforcing.
     DnssecBogus,
-    /// The upstream answer pointed at an address inside the home network, so the whole
+    /// The upstream answer pointed at an address inside the local network, so the whole
     /// response was dropped (DNS rebinding defence).
     /// **This must stay distinct from a blocklist hit** — it means someone is using a
-    /// domain name to attack devices in the house, not that an ad domain showed up.
+    /// domain name to attack devices on the network, not that an ad domain showed up.
     Rebind,
-    /// A name that only means something inside the house (`.local`, `home.arpa`, private
+    /// A name that only means something inside the network (`.local`, `home.arpa`, private
     /// address reverse lookups), answered locally with "no such domain" and never sent
     /// upstream. **Not counted as blocked** — the weekly "blocked N" excludes these.
     Local,
@@ -116,7 +116,7 @@ pub enum EventKind {
     /// means `serve_network` needs its range.
     OutsideClient,
     /// The self health check failed repeatedly and the service exited so the system would
-    /// restart it. **Nothing in the house can resolve any name during this window**, which
+    /// restart it. **Nothing on the network can resolve any name during this window**, which
     /// is worse than having no filtering.
     Unresponsive,
 }
@@ -193,7 +193,7 @@ impl EventKind {
         }
     }
 
-    /// Whether the household was unprotected while this was happening.
+    /// Whether the network was unprotected while this was happening.
     ///
     /// What breaks if you change it: item 6 of the weekly summary ("was there a window with
     /// no protection?") reads this. Adding an event kind without revisiting this function
@@ -210,10 +210,10 @@ impl EventKind {
             | Self::BlocklistLoaded
             | Self::UpstreamsRecovered
             | Self::RecordsDropped
-            // This blocks more than usual, not less; household protection is not interrupted.
+            // This blocks more than usual, not less; protection is not interrupted.
             | Self::AllowlistFailed
             // Affects one device only, and it will mostly just ask another resolver;
-            // household protection is not interrupted.
+            // protection is not interrupted.
             | Self::RateLimited
             // Not a device this service is for.
             | Self::OutsideClient => false,

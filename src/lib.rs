@@ -1,4 +1,4 @@
-//! Phylode — a DNS gatekeeper for Apple households.
+//! Phylode — a DNS gatekeeper for networks with Apple devices on them.
 //!
 //! The layering follows one decision: the protocol layer stays behind `dns` (the only
 //! module that touches an external DNS library), while policy, cache, upstream rotation,

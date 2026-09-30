@@ -1,10 +1,46 @@
+**English** · [繁體中文](README.zh-TW.md)
+
 # Phylode
 
-A DNS gatekeeper for Apple households. Every device on your network gets ads, trackers,
-malicious domains and chatty appliances filtered out before they resolve — while Apple's
-own services are always let through.
+A DNS gatekeeper for networks full of Apple devices — a home, an office, a studio, a
+school. Leave it running on a Mac that stays on (an idle Mac mini is ideal) and every device
+on the network gets ads, trackers, malicious domains and chatty appliances filtered out
+before they resolve, while Apple's own services are always let through.
 
-The name combines the Greek *phylax* (guardian) and *ōidē* (song): a guardian's song.
+## Install
+
+Needs macOS and a Rust toolchain ([rustup](https://rustup.rs)). Tested on macOS 26 and 27 on
+Apple silicon; installing, switching on and off, and uninstalling are exercised end to end in
+CI on every change.
+
+```bash
+cargo build --release
+sudo ./target/release/phylode install   # boot service, lists, daily updates
+sudo phylode on                         # point this Mac's DNS at it
+```
+
+`phylode on` ends by printing this Mac's address on the network. To filter every device, set
+that address as the DNS server in your router's DHCP settings (or on each device), and give
+this Mac a fixed address there so it does not move. If the router also hands out its own IPv6
+DNS servers, devices may use those instead; see [SECURITY.md](SECURITY.md). A step-by-step
+guide for common routers is planned.
+
+Devices on the private ranges networks normally use (10.x, 172.16–31.x, 192.168.x,
+100.64–127.x, 169.254.x, and IPv6 `fc00::/7` and `fe80::/10`) are answered. A network on
+public addresses adds a `serve_network` line to `/usr/local/etc/phylode.conf`, then runs
+`sudo phylode install` again to restart the service.
+
+`sudo phylode off` puts this Mac's DNS back to automatic. `sudo phylode uninstall` does that
+first, then removes the service and its firewall entry; your configuration, lists and journal
+are left in place.
+
+Install stops without changing anything if a folder it writes into as root (`/usr/local/bin`
+and friends) can be changed by a standard, non-administrator account.
+
+If something goes wrong, `phylode diagnostics` prints versions, states, counts and recent
+service events with addresses and home folders removed — written to be pasted into a public
+issue. Do not post the query journal or `phylode status`; they hold your browsing history and
+configuration.
 
 ## Status (2026-09-30)
 
@@ -15,9 +51,12 @@ Working today: domain blocking, encrypted upstream forwarding, answer caching, a
 journal, an allowlist, the `allow`/`block`/`status`/`report` commands, deployment files
 that start the service at boot, plus:
 
+- **Serves the whole network** — listens on every interface and answers devices on the
+  private ranges networks use (plus any you add); anything else gets no response, so the
+  Mac never becomes an open resolver. Install registers it with the macOS firewall.
 - **Self health check** — sends itself a real query every 10 seconds; two silent rounds in
   a row and it writes the reason to the journal and exits so the supervisor restarts it.
-- **DNS rebinding protection** — an upstream answer pointing into your home network is
+- **DNS rebinding protection** — an upstream answer pointing into your local network is
   discarded in full.
 - **Resource limits** — 1000 queries per minute per device, 300 in-flight upstream
   queries, 10 concurrent TCP connections.
@@ -32,7 +71,7 @@ that start the service at boot, plus:
   the previous version is kept.
 - **CNAME cloaking defence** — a clean-looking name whose alias points at a tracker is
   blocked too.
-- **Internal names never leave the house** — `.local`, the router's search domain and
+- **Internal names never leave the network** — `.local`, the router's search domain and
   private-address reverse lookups are answered locally.
 - **Upstream certificates verified against the macOS system trust store** — root
   certificates update with the OS.
@@ -40,10 +79,10 @@ that start the service at boot, plus:
 - **Weekly summaries archived for 12 weeks** — the archive excludes ordinarily allowed
   domains.
 
-About 10,500 lines of first-party code, 9 direct dependencies (181 packages in
-`Cargo.lock`), 187 tests.
+About 10,800 lines of first-party code, 9 direct dependencies (181 packages in
+`Cargo.lock`), 197 tests.
 
-**Fuzzing**: four entry points (packets from home devices, packets from upstream, the
+**Fuzzing**: four entry points (packets from devices on the network, packets from upstream, the
 blocklist parser, the config parser), under `fuzz/`, run by a GitHub Actions workflow. The
 latest run gave each target 10 minutes: 114 million cases in total, no crashes or hangs.
 
@@ -64,7 +103,7 @@ $ dig @127.0.0.1 no-such-domain.example
 ;; ->>HEADER<<- status: NXDOMAIN          ← upstream says it does not exist, relayed with its SOA
 
 $ dig @127.0.0.1 192.168.0.1.nip.io
-;; ->>HEADER<<- status: NOERROR, ANSWER: 0  ← this name resolves into the home network,
+;; ->>HEADER<<- status: NOERROR, ANSWER: 0  ← this name resolves into the local network,
 192.168.0.1.nip.io.  2  IN  SOA  ...           so the whole answer is dropped (rebinding defence)
 
 $ phylode allow doubleclick.net
@@ -97,7 +136,7 @@ Gatekeeper, week of 2026-09-14
 - **It restarts itself when it hangs without exiting.** A boot supervisor only checks
   whether the process is alive; it cannot detect "still running but no longer answering".
 
-- **An upstream answer pointing into the home network is discarded in full.** This is the
+- **An upstream answer pointing into the local network is discarded in full.** This is the
   technique for turning a browser into a pivot into your LAN. One internal address in a
   batch voids the entire batch — an attacker will mix in a public address betting that
   only individual records get filtered. Domains that genuinely belong to your network go
@@ -107,7 +146,7 @@ Gatekeeper, week of 2026-09-14
   Caching it would keep the domain reachable after the list recovers.
 
 - **`captive.apple.com` and `push.apple.com` are hardcoded to always resolve.** Block the
-  first and every Apple device in the house pops up a captive-portal login window; block
+  first and every Apple device on the network pops up a captive-portal login window; block
   the second and push notifications and iMessage stop working.
 
 - **The service does not run as root.** launchd binds port 53 and hands the socket over
@@ -116,13 +155,16 @@ Gatekeeper, week of 2026-09-14
 - **Zero file I/O on the answer path.** Journal entries go into a bounded channel and a
   dedicated thread batches them to disk.
 
+- **Devices outside the networks it serves get no answer at all.** Not an error, not a
+  refusal: either would still hand an attacker a packet to aim at someone else.
+
 - **No control channel of any kind.** The commands edit plain text files. No network port,
   no unix socket.
 
 ## Out of scope for v1
 
-Routing all traffic through the gatekeeper, protection while away from home, a graphical
-interface, telemetry of any kind.
+Routing all traffic through the gatekeeper, protection for devices away from the network, a
+graphical interface, telemetry of any kind.
 
 ## Built with
 
@@ -135,28 +177,9 @@ The whole crate is `deny(unsafe_code)`. The only exception is the pair of functi
 adopt launchd's file descriptors; a test counts the exceptions and fails the build if one
 more appears.
 
-## Install
+## The name
 
-Needs macOS and a Rust toolchain ([rustup](https://rustup.rs)). Tested on macOS 26 and 27 on
-Apple silicon; installing, switching on and off, and uninstalling are exercised end to end in
-CI on every change.
-
-```bash
-cargo build --release
-sudo ./target/release/phylode install   # boot service, lists, daily updates
-sudo phylode on                         # point this Mac's DNS at it
-```
-
-`sudo phylode off` puts this Mac's DNS back to automatic. `sudo phylode uninstall` does that
-first, then removes the service; your configuration, lists and journal are left in place.
-
-Install stops without changing anything if a folder it writes into as root (`/usr/local/bin`
-and friends) can be changed by a standard, non-administrator account.
-
-If something goes wrong, `phylode diagnostics` prints versions, states, counts and recent
-service events with addresses and home folders removed — written to be pasted into a public
-issue. Do not post the query journal or `phylode status`; they hold your browsing history and
-configuration.
+The Greek *phylax* (guardian) and *ōidē* (song): a guardian's song.
 
 ## License
 
@@ -166,7 +189,3 @@ option, following the convention of the Rust ecosystem.
 Unless you explicitly state otherwise, any contribution intentionally submitted for
 inclusion in this project shall be dual licensed as above, without any additional terms
 or conditions.
-
----
-
-繁體中文版：[README.zh-TW.md](README.zh-TW.md)

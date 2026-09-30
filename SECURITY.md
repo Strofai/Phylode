@@ -23,6 +23,8 @@ There are no releases yet. Only the latest `main` is supported.
 - Anything that makes `captive.apple.com`, `*.push.apple.com` or the other hard-coded Apple
   hosts fail to resolve.
 - A way past the DNS rebinding protection or the per-device rate limit.
+- A way to get any answer from outside the networks the service serves, which would make it
+  usable in reflection attacks.
 - Query data leaving the machine other than the encrypted query to the chosen upstream.
 - A way for an unprivileged local user to change the allowlist, blocklist or configuration.
 
@@ -35,3 +37,7 @@ There are no releases yet. Only the latest `main` is supported.
   names entirely outside the gatekeeper.
 - **IPv6 can bypass IPv4-only setups.** If the router also advertises its own IPv6
   resolvers, devices may use them instead.
+- **Anyone on a served network can use it.** On a shared network (a café, a hotel) that
+  includes strangers, whose queries would then be journalled. Phylode is meant for a Mac that
+  stays on one network; on a laptop that travels, prefer `sudo phylode uninstall` before
+  joining networks you do not control.

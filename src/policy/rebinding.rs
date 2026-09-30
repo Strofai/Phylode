@@ -18,7 +18,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 pub enum Rebinding {
     /// No address points inward; answer as usual.
     Clean,
-    /// At least one address points into the home network; discard the whole answer.
+    /// At least one address points into the local network; discard the whole answer.
     Blocked,
 }
 
@@ -76,7 +76,7 @@ fn normalize(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// Whether this address counts as "inside the home network or this machine".
+/// Whether this address counts as "inside the local network or this machine".
 ///
 /// What breaks if you change it: missing a range leaves that range usable for attacking the
 /// LAN; blocking an extra public range stops legitimate sites from loading. The standard

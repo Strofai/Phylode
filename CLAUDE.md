@@ -1,7 +1,8 @@
 # Phylode — project rules
 
-A DNS gatekeeper for Apple households: blocks ads, trackers, malicious domains and chatty
-appliances for every device on the network. Rust, running on macOS.
+A DNS gatekeeper for networks full of Apple devices (a home, an office, a studio, a school):
+blocks ads, trackers, malicious domains and chatty appliances for every device on the
+network. Rust, running on a Mac that stays on.
 
 This file is the contract for anyone — human or AI — working on this repository. Read it
 before writing code.
@@ -18,14 +19,14 @@ before writing code.
 
 Resolve trade-offs by going down this list.
 
-1. **Keeping the household online matters more than blocking more.** When the two
+1. **Keeping the network online matters more than blocking more.** When the two
    conflict, allow.
 2. **Apple's own services always pass, and their encrypted traffic is never inspected.**
    iCloud Private Relay is not interfered with either. The cost: Apple states that Private
    Relay protects Safari browsing, **DNS queries** and unencrypted app traffic, so a device
    with it enabled resolves names entirely outside the gatekeeper.
-3. **Data never leaves the house.** The journal is local only; outbound queries are
-   encrypted and carry no information about the home network.
+3. **Data never leaves the network.** The journal is local only; outbound queries are
+   encrypted and carry no information about the local network.
 4. **Every block must be explainable** (which list matched), and a wrong block must be
    undoable immediately.
 
@@ -45,8 +46,10 @@ Resolve trade-offs by going down this list.
   violating principle 3. Pick one.
 - **The journal is written to disk in batches, never to a RAM disk.** A reboot would empty
   it, breaking the promise that detail is retained for 10 days.
-- **No inbound network access.** Reading the journal requires being on the home network
-  with a registered key.
+- **DNS is the only thing listening on the network, and only for the networks it serves.**
+  Port 53 answers loopback, the private ranges and any `serve_network` block; everything
+  else gets no response. There is no remote interface: the journal and the lists are read
+  and changed on the Mac itself, or over SSH.
 
 ## Before touching dependencies
 
@@ -66,7 +69,7 @@ Run this once before starting work and put the result in the first paragraph of 
 
 ## Before writing to the repository
 
-- **Nothing about a specific home network goes in this repository.** No ISP names, device
+- **Nothing about a specific network goes in this repository.** No ISP names, device
   models, network ranges or keys — not in code, not in comments, not in commit messages.
   Use RFC 5737 documentation addresses (`192.0.2.0/24`, `198.51.100.0/24`,
   `203.0.113.0/24`) and RFC 1918 ranges in tests.
@@ -95,6 +98,10 @@ like a product's release history, not a work log.
   `Cargo.toml` or `Cargo.lock` changed, `cargo deny`; documentation-only changes need none of
   those (CI skips them too). Local checkpoints during long work are fine — tidy them into
   coherent commits before pushing.
+- **What only CI can check goes through a branch first.** A change to `.github/workflows/`,
+  or to anything `install.yml` exercises (`src/install/`, `deploy/`), cannot be verified
+  locally: push it to a branch, run the workflow there (`install.yml` has a manual trigger),
+  and bring it to `main` only once it passes. A step that has never run is not finished.
 - **Summary line:** imperative, at most 72 characters, saying what changes for the person
   using it rather than which files moved: `Keep the journal within its retention on a Mac
   that sleeps at night`, not `Update writer.rs`. No type prefixes, no trailing full stop.
@@ -109,7 +116,7 @@ like a product's release history, not a work log.
 ## Established facts you can design against
 
 - **`captive.apple.com` and `*.push.apple.com` must never be blocked.** Block the first and
-  every Apple device in the house repeatedly mistakes the network for a captive portal;
+  every Apple device on the network repeatedly mistakes it for a captive portal;
   block or proxy the second and push notifications and iMessage stop working.
 - HTTPS content inspection of Apple services makes the connection fail outright (per
   Apple's own documentation).

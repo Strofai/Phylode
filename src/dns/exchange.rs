@@ -217,7 +217,7 @@ fn is_server_failure(result: &Result<DnsResponse, NetError>) -> bool {
 /// Used when the upstream gives no negative caching time.
 ///
 /// ⚠️ Ours, with no industry source. Short is safer than long: a newly registered domain
-/// remembered as "does not exist" for too long is unreachable at home for that whole time,
+/// remembered as "does not exist" for too long is unreachable on the network for that whole time,
 /// with no visible reason.
 const DEFAULT_NEGATIVE_TTL: Duration = Duration::from_secs(60);
 

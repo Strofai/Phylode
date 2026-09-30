@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 /// figure for a home resolver.
 ///
 /// One page load on a cold cache takes dozens of queries, so a limit counted in tens per
-/// second would catch normal household use; 1000 a minute leaves room for several at once.
+/// second would catch normal use; 1000 a minute leaves room for several at once.
 /// What breaks if you change it: set it too low and wrongly limited devices fall back to an
 /// unfiltered resolver.
 pub const MAX_PER_WINDOW: u32 = 1000;
@@ -23,8 +23,8 @@ pub const MAX_PER_WINDOW: u32 = 1000;
 pub const WINDOW: Duration = Duration::from_secs(60);
 
 /// Maximum number of sources tracked at once. This one is ours, not an industry value: a
-/// household has single digits to a few dozen devices, so 4096 leaves two orders of
-/// magnitude of headroom. What breaks if you change it: without a cap, packets with forged
+/// home has a few dozen devices and an office or school a few hundred, so 4096 leaves an
+/// order of magnitude of headroom. What breaks if you change it: without a cap, packets with forged
 /// source addresses could grow this table without bound — which is exactly what the cap is
 /// for.
 const MAX_TRACKED: usize = 4096;
@@ -66,7 +66,7 @@ impl RateLimit {
         }
         let Ok(mut clients) = self.clients.lock() else {
             // A poisoned lock (another thread panicked holding it) means no limiting:
-            // keeping the household online matters more than blocking more (principle 1).
+            // keeping the network online matters more than blocking more (principle 1).
             return Admit::Yes;
         };
         if !clients.contains_key(&client) && clients.len() >= MAX_TRACKED {

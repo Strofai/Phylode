@@ -21,12 +21,12 @@ pub mod archive;
 /// The value is 4 because a HomeKit hub (an Apple TV or HomePod) legitimately queries far
 /// more than a phone or laptop. A lower threshold would flag the hub every single day.
 /// ⚠️ **This multiplier has not been validated against real multi-device data yet.**
-/// Retune it with a real distribution once the whole household is behind the gatekeeper.
+/// Retune it with a real distribution once a whole network is behind the gatekeeper.
 const BURST_MULTIPLIER: u64 = 4;
 
 /// Threshold for "keeps asking for the same unfamiliar domain": one device asking for one
 /// domain more than this many times.
-/// ⚠️ Likewise unvalidated against real data; retune once the household is connected.
+/// ⚠️ Likewise unvalidated against real data; retune once a whole network is connected.
 const REPEAT_THRESHOLD: u64 = 500;
 
 /// How many entries the top-N lists show.
@@ -64,7 +64,7 @@ pub struct Summary {
     /// Times the in-flight upstream limit was full, so the query was neither sent nor
     /// served from cache. Should normally be 0.
     pub overloaded_queries: u64,
-    /// Times an answer pointed into the home network and the whole response was dropped
+    /// Times an answer pointed into the local network and the whole response was dropped
     /// (DNS rebinding defence).
     pub rebind_blocked: u64,
     /// Times an upstream signature failed to validate and the answer was allowed through
@@ -297,7 +297,7 @@ impl Summary {
         if self.rebind_blocked > 0 {
             out.push_str(&format!(
                 "   ⚠️ Also dropped {} answers pointing at devices inside your network — \
-                 that is how a domain name gets used to attack your home devices\n",
+                 that is how a domain name gets used to attack devices on your network\n",
                 self.rebind_blocked
             ));
             for (domain, count) in sorted_desc(&self.rebind_by_domain).into_iter().take(TOP_N) {
@@ -501,11 +501,11 @@ mod tests {
 2026-09-14 10:00:02\t127.0.0.1\tapple.com\tA\tallowed\t-
 2026-09-14 10:00:03\t192.168.0.9\ttracker.example.net\tA\tblocked\tblocklist
 2026-09-14 10:00:04\t192.168.0.9\tshop.example.com\tA\tfail-open\tblocklist unavailable, allowing
-2026-09-14 10:00:05\t127.0.0.1\trebind.example.org\tA\trebind\tanswer points into the home network
+2026-09-14 10:00:05\t127.0.0.1\trebind.example.org\tA\trebind\tanswer points into the local network
 ";
 
     const EVENTS: &str = "\
-2026-09-14 09:59:00\tstarted\tphylode started
+2026-09-14 09:59:00\tstarted\tPhylode started
 2026-09-14 10:00:04\tblocklist-failed\tcould not read the blocklist
 2026-09-14 10:05:00\trecords-dropped\tdropped 12 records
 ";
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn answers_dropped_for_pointing_inward_are_counted_separately() {
         // This is not the same thing as a blocklist hit; merged together, an attack on the
-        // home network becomes invisible.
+        // local network becomes invisible.
         let dir = write_fixture("rebind");
         let s = Summary::gather(&dir, &one_day());
         assert_eq!(s.rebind_blocked, 1);

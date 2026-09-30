@@ -233,7 +233,7 @@ impl Config {
         self.stale_max_age
     }
 
-    /// Domains permitted to resolve to home network addresses. **Empty by default** — any
+    /// Domains permitted to resolve to local network addresses. **Empty by default** — any
     /// domain not listed here has its answer discarded whole if it resolves inward (DNS
     /// rebinding defence).
     ///
