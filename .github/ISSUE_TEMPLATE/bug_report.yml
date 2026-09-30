@@ -5,30 +5,64 @@ body:
   - type: markdown
     attributes:
       value: |
+        This form follows Apple's own advice for bug reports: a title that says what goes wrong
+        and when, exact steps, what you expected, what happened, and your configuration.
+
+        **Title:** name the problem and what triggers it — "Apple TV cannot resolve names after
+        the Mac wakes from sleep", not "DNS broken".
+
         Security problems should not go here — use private reporting (see SECURITY.md).
-        Issues are public. Please do not paste your query journal, `phylode status` or the raw
-        service log: they contain the domains people on your network looked up, your network addresses
-        and your file paths. `phylode diagnostics` below is written to be safe to share.
-  - type: textarea
-    id: what
-    attributes:
-      label: What happened, and what did you expect?
-    validations:
-      required: true
+        Issues are public. Do not paste your query journal, `phylode status` or the raw
+        service log: they contain the domains people on your network looked up, your network
+        addresses and your file paths. `phylode diagnostics` below is written to be safe to
+        share.
   - type: textarea
     id: steps
     attributes:
       label: Steps to reproduce
+      description: Number every step, as if the reader has never used Phylode.
       placeholder: |
         1. sudo phylode install
-        2. dig @127.0.0.1 example.com
+        2. sudo phylode on
+        3. On an iPhone on the same network, open https://example.com
     validations:
       required: true
-  - type: input
-    id: commit
+  - type: textarea
+    id: expected
     attributes:
-      label: Phylode commit
-      description: Output of `git rev-parse --short HEAD` in your checkout.
+      label: Expected results
+      placeholder: The page loads.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual results
+      description: Include any message shown, word for word.
+      placeholder: Safari says the server cannot be found.
+    validations:
+      required: true
+  - type: dropdown
+    id: reproducible
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Sometimes
+        - Once so far
+    validations:
+      required: true
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Configuration
+      description: |
+        Anything that could change the outcome. For example: which device asked (Mac, iPhone,
+        Apple TV…), whether the router hands out this Mac's address or each device was set by
+        hand, whether the network has IPv6, whether iCloud Private Relay or the macOS firewall
+        is on, and whether the Mac was asleep or had just restarted. No addresses or names.
+    validations:
+      required: true
   - type: textarea
     id: diagnostics
     attributes:
@@ -40,3 +74,13 @@ body:
       render: text
     validations:
       required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Phylode commit
+      description: Output of `git rev-parse --short HEAD` in your checkout.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Screenshots help when the problem is on screen; crop out addresses and names first.
