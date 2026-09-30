@@ -1,0 +1,57 @@
+name: Fuzz
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to run each target
+        default: "600"
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    # The weekly schedule only runs once the repository is public, where macOS runners are
+    # free; on a private repository each macOS minute is billed at ten times the Linux rate.
+    if: github.event_name != 'schedule' || !github.event.repository.private
+    name: fuzz ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [request, upstream, blocklist, config]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      # Generated cases accumulate across runs here; corpus/ must come first on the command
+      # line or new cases are written into seeds/.
+      - uses: actions/cache@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Run
+        env:
+          SECONDS_PER_TARGET: ${{ inputs.seconds || '600' }}
+        # --target is explicit because the prebuilt cargo-fuzz may be an x86_64 binary, and it
+        # defaults to its own architecture rather than the runner's installed toolchain.
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cargo fuzz run -s none --target "$(rustc -vV | sed -n 's/^host: //p')" ${{ matrix.target }} \
+            fuzz/corpus/${{ matrix.target }} fuzz/seeds/${{ matrix.target }} \
+            -- -max_total_time="$SECONDS_PER_TARGET"
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

@@ -75,6 +75,10 @@ Run this once before starting work and put the result in the first paragraph of 
   decision, not a silent addition.
 - Command output, weekly summaries and error messages are product surface. Write them in
   plain language.
+- Commit messages are in English, like the rest of the repository: the people reading
+  `git log` are contributors.
+- CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, clippy, the tests and
+  `cargo deny` on every push and pull request; run the same locally before pushing.
 
 ## Established facts you can design against
 
