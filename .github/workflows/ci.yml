@@ -1,9 +1,13 @@
 name: CI
 
+# Documentation-only changes skip CI: runners are billed per minute on a private repository,
+# and nothing here reads those files.
 on:
   push:
     branches: [main]
+    paths-ignore: ["**.md", "LICENSE-*", ".github/ISSUE_TEMPLATE/**", ".github/dependabot.yml"]
   pull_request:
+    paths-ignore: ["**.md", "LICENSE-*", ".github/ISSUE_TEMPLATE/**", ".github/dependabot.yml"]
 
 permissions:
   contents: read
