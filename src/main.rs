@@ -21,7 +21,7 @@ use phylode::dns::{self, Listener};
 use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
 use phylode::install;
-use phylode::journal::{EventKind, Journal, LocalZone};
+use phylode::journal::{self, EventKind, Journal, LocalZone};
 use phylode::policy::{Allowlist, Blocklist, RebindGuard};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
@@ -404,13 +404,10 @@ fn diagnostics(config_path: &Path) -> ExitCode {
         facts.allowlist_entries = count(config.allowlist());
         facts.user_blocklist_entries = count(config.user_blocklist());
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        for day in report::recent_days(now, &local_zone(), 7) {
-            let file = config.journal_dir().join(format!("events-{day}.tsv"));
-            let Ok(text) = std::fs::read_to_string(file) else {
+        for day in report::recent_days(journal::unix_now(), &local_zone(), 7) {
+            let Ok(text) =
+                std::fs::read_to_string(journal::events_file(config.journal_dir(), &day))
+            else {
                 continue;
             };
             facts.events.extend(text.lines().filter_map(|line| {
@@ -666,10 +663,7 @@ fn spawn_archiver(config: Config, zone: LocalZone) {
         loop {
             let dir = config.journal_dir().to_path_buf();
             let zone = zone.clone();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
+            let now = journal::unix_now();
             let result =
                 tokio::task::spawn_blocking(move || report::archive::archive_due(&dir, now, &zone))
                     .await;

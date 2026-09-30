@@ -18,7 +18,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use super::Summary;
-use crate::journal::{DIR_MODE, FILE_MODE, LocalZone};
+use crate::journal::{self, DIR_MODE, FILE_MODE, LocalZone};
 
 /// Name of the subdirectory under the journal directory that holds weekly archives.
 pub const ARCHIVE_DIR: &str = "weekly";
@@ -82,8 +82,8 @@ pub fn archive_due(
 
 fn has_any_journal(journal_dir: &Path, days: &[String]) -> bool {
     days.iter().any(|day| {
-        journal_dir.join(format!("{day}.tsv")).exists()
-            || journal_dir.join(format!("events-{day}.tsv")).exists()
+        journal::queries_file(journal_dir, day).exists()
+            || journal::events_file(journal_dir, day).exists()
     })
 }
 

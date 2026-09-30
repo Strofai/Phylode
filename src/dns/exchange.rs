@@ -136,11 +136,6 @@ impl Exchange {
         })
     }
 
-    /// Which upstream this channel connects to, for journalling and reporting.
-    pub fn server_name(&self) -> &str {
-        &self.server_name
-    }
-
     /// Sends one query to this upstream.
     ///
     /// What breaks if you change it: **"no such name" and "cannot reach this upstream" must
@@ -267,7 +262,7 @@ mod tests {
         // nor can resolve a hostname.
         let exchange = Exchange::connect(&upstream("tls 1.1.1.1 cloudflare-dns.com"))
             .expect("building a channel from an IP should succeed");
-        assert_eq!(exchange.server_name(), "cloudflare-dns.com");
+        assert!(format!("{exchange:?}").contains("cloudflare-dns.com"));
     }
 
     #[test]

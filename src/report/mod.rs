@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::journal::{EventKind, LocalZone};
+use crate::journal::{self, EventKind, LocalZone};
 
 pub mod archive;
 
@@ -95,7 +95,7 @@ impl Summary {
         let mut per_client_domain: HashMap<(String, String), u64> = HashMap::new();
 
         for day in days {
-            match std::fs::read_to_string(directory.join(format!("{day}.tsv"))) {
+            match std::fs::read_to_string(journal::queries_file(directory, day)) {
                 Ok(text) => {
                     summary.absorb_queries(&text, &mut blocked_counts, &mut per_client_domain);
                 }
@@ -103,7 +103,7 @@ impl Summary {
                 Err(_) => summary.unreadable_files.push(format!("{day}.tsv")),
             }
 
-            match std::fs::read_to_string(directory.join(format!("events-{day}.tsv"))) {
+            match std::fs::read_to_string(journal::events_file(directory, day)) {
                 Ok(text) => summary.absorb_events(&text),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => summary.unreadable_files.push(format!("events-{day}.tsv")),

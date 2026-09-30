@@ -18,7 +18,7 @@ use thiserror::Error;
 /// It must stay in single-digit seconds. Set it higher and after the user allows a domain the
 /// device keeps using the cached block, so the allow appears not to have worked. The limit is
 /// enforced in [`Config::parse`].
-pub const BLOCK_TTL_MAX: Duration = Duration::from_secs(9);
+const BLOCK_TTL_MAX: Duration = Duration::from_secs(9);
 
 const DEFAULT_BLOCK_TTL: Duration = Duration::from_secs(2);
 const DEFAULT_CACHE_CAPACITY: usize = 20_000;

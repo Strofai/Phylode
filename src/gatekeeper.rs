@@ -96,9 +96,9 @@ impl Gatekeeper {
         };
 
         match self.conductor.resolve(query).await {
-            Outcome::Answered {
-                answer, signature, ..
-            } => self.deliver(query, answer, write, signature),
+            Outcome::Answered { answer, signature } => {
+                self.deliver(query, answer, write, signature)
+            }
             // Every upstream is down. **Never fall back to plaintext** (RFC 8310 Strict
             // Privacy). Carry on with a stale answer if there is one, and only fail if there
             // is not — this is what product principle 1 looks like in code.

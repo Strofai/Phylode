@@ -17,7 +17,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use thiserror::Error;
 
-use super::{Civil, Entry, Event, EventKind, LocalZone, format_event, format_line};
+use super::{
+    Civil, EVENTS_PREFIX, Entry, Event, EventKind, LocalZone, events_file, format_event,
+    format_line, queries_file, unix_seconds,
+};
 
 /// Directory permissions: the owner (the service account) reads and writes, the group reads,
 /// nobody else gets in. The group is inherited from the parent directory (BSD semantics), and
@@ -142,15 +145,15 @@ struct State {
 
 /// A writer that rolls over to a new file each day.
 struct DayFile {
-    prefix: &'static str,
+    path_for: fn(&Path, &str) -> PathBuf,
     open_date: Option<String>,
     writer: Option<BufWriter<File>>,
 }
 
 impl DayFile {
-    fn new(prefix: &'static str) -> Self {
+    fn new(path_for: fn(&Path, &str) -> PathBuf) -> Self {
         Self {
-            prefix,
+            path_for,
             open_date: None,
             writer: None,
         }
@@ -159,7 +162,7 @@ impl DayFile {
     fn write(&mut self, directory: &Path, date: &str, line: &str) -> bool {
         if self.open_date.as_deref() != Some(date) {
             self.flush();
-            self.writer = open_day_file(directory, self.prefix, date);
+            self.writer = open_day_file(&(self.path_for)(directory, date));
             self.open_date = Some(date.to_string());
         }
         let Some(writer) = self.writer.as_mut() else {
@@ -182,8 +185,8 @@ impl State {
         Self {
             directory,
             zone,
-            queries: DayFile::new(""),
-            events: DayFile::new("events-"),
+            queries: DayFile::new(queries_file),
+            events: DayFile::new(events_file),
             pending: 0,
             last_flush: Instant::now(),
             dropped,
@@ -199,11 +202,7 @@ impl State {
             // would simply write no line.
             Entry::Flush(_) => return,
         };
-        let unix = at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let date = Civil::from_unix(unix, &self.zone).date_string();
+        let date = Civil::from_unix(unix_seconds(at), &self.zone).date_string();
 
         let written = if is_event {
             self.events.write(&self.directory, &date, &line)
@@ -257,12 +256,12 @@ impl State {
     }
 }
 
-fn open_day_file(directory: &Path, prefix: &str, date: &str) -> Option<BufWriter<File>> {
+fn open_day_file(path: &Path) -> Option<BufWriter<File>> {
     OpenOptions::new()
         .create(true)
         .append(true)
         .mode(FILE_MODE)
-        .open(directory.join(format!("{prefix}{date}.tsv")))
+        .open(path)
         .ok()
         .map(BufWriter::new)
 }
@@ -288,10 +287,7 @@ impl Cleaner {
     }
 
     fn maybe_clean(&mut self, directory: &Path, now: SystemTime) {
-        let unix = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let unix = unix_seconds(now);
         let today = Civil::from_unix(unix, &self.zone).date_string();
         if self.last_cleaned_date.as_deref() == Some(today.as_str()) {
             return;
@@ -324,7 +320,7 @@ fn remove_files_before(directory: &Path, cutoff: &str) {
             continue;
         };
         // Event files carry an extra prefix, which has to come off before comparing dates.
-        let date = stem.strip_prefix("events-").unwrap_or(stem);
+        let date = stem.strip_prefix(EVENTS_PREFIX).unwrap_or(stem);
         if date < cutoff {
             let _ = std::fs::remove_file(entry.path());
         }

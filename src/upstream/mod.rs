@@ -44,7 +44,6 @@ pub enum Outcome {
     Answered {
         answer: Answer,
         signature: Signature,
-        server: String,
     },
     /// Every upstream was tried and none was reachable.
     AllDown,
@@ -146,7 +145,6 @@ impl Conductor {
                     return Outcome::Answered {
                         answer: checked.answer,
                         signature: checked.signature,
-                        server: member.exchange.server_name().to_string(),
                     };
                 }
                 Err(_) => {

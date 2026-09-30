@@ -12,7 +12,7 @@ mod civil;
 mod writer;
 
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
@@ -329,10 +329,31 @@ fn format_event(event: &Event, zone: &LocalZone) -> String {
     )
 }
 
-fn unix_seconds(at: SystemTime) -> i64 {
+/// What an event file's name starts with; a query file's name is the date alone.
+/// What breaks if you change it: files already on disk keep the old name, so their events stop
+/// appearing in the weekly summary and are never cleaned up.
+const EVENTS_PREFIX: &str = "events-";
+
+/// The file one day's queries are written to (`day` as `YYYY-MM-DD`).
+pub fn queries_file(directory: &Path, day: &str) -> PathBuf {
+    directory.join(format!("{day}.tsv"))
+}
+
+/// The file one day's service events are written to (`day` as `YYYY-MM-DD`).
+pub fn events_file(directory: &Path, day: &str) -> PathBuf {
+    directory.join(format!("{EVENTS_PREFIX}{day}.tsv"))
+}
+
+/// Whole seconds since the Unix epoch, the form every journal date is computed from. A clock
+/// set before 1970 reads as 0.
+pub fn unix_seconds(at: SystemTime) -> i64 {
     at.duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// [`unix_seconds`] for the current moment.
+pub fn unix_now() -> i64 {
+    unix_seconds(SystemTime::now())
 }
 
 /// Formats a record as one TSV line. The field order is fixed; changing it makes existing
