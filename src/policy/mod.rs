@@ -23,11 +23,17 @@ pub use rebinding::{RebindGuard, Rebinding};
 /// exemptions and local zones all depend on this one function. Narrow it to exact names and
 /// every subdomain stops matching.
 pub(crate) fn any_suffix(name: &str, hit: impl Fn(&str) -> bool) -> bool {
-    let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+    let name = name.trim().trim_end_matches('.');
     if name.is_empty() {
         return false;
     }
-    let mut rest = name.as_str();
+    // Names from the wire are already lowercase (`dns::Name`), so the common case borrows.
+    let name: std::borrow::Cow<'_, str> = if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        name.to_ascii_lowercase().into()
+    } else {
+        name.into()
+    };
+    let mut rest = name.as_ref();
     loop {
         if hit(rest) {
             return true;

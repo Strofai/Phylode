@@ -620,11 +620,13 @@ fn spawn_archiver(config: Config, zone: LocalZone) {
 }
 
 /// Background task: load once, then periodically check whether the files changed and reload
-/// when they have.
+/// only the list whose files changed.
 ///
 /// What breaks if you change it: the first load deliberately does not block startup. When
 /// loading fails every query is allowed through, but the reason has to be printed where
-/// someone can see it.
+/// someone can see it. The two lists are fingerprinted separately because `phylode allow`
+/// only touches the small allowlist; reloading the million-entry blocklist for it would
+/// cost seconds of CPU and a second copy of the list in memory each time.
 fn spawn_reloader(
     blocklist: Blocklist,
     allowlist: Allowlist,
@@ -632,73 +634,84 @@ fn spawn_reloader(
     journal: Option<Journal>,
 ) {
     tokio::spawn(async move {
-        let mut last_signature = String::new();
+        let mut lists_seen = None;
+        let mut allow_seen = None;
         loop {
-            let signature = signature_of(&config);
-            if signature != last_signature {
-                last_signature = signature;
-                reload_once(&blocklist, &allowlist, &config, journal.as_ref()).await;
+            let lists = fingerprint(
+                config
+                    .blocklists()
+                    .iter()
+                    .map(PathBuf::as_path)
+                    .chain(config.user_blocklist()),
+            );
+            if lists_seen.as_ref() != Some(&lists) {
+                lists_seen = Some(lists);
+                reload_blocklist(&blocklist, &config, journal.as_ref()).await;
+            }
+            if let Some(path) = config.allowlist() {
+                let allow = fingerprint([path]);
+                if allow_seen.as_ref() != Some(&allow) {
+                    allow_seen = Some(allow);
+                    reload_allowlist(&allowlist, path, journal.as_ref()).await;
+                }
             }
             tokio::time::sleep(RELOAD_INTERVAL).await;
         }
     });
 }
 
-async fn reload_once(
-    blocklist: &Blocklist,
-    allowlist: &Allowlist,
-    config: &Config,
-    journal: Option<&Journal>,
-) {
+async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Option<&Journal>) {
     let blocklist = blocklist.clone();
-    let allowlist = allowlist.clone();
     let required: Vec<PathBuf> = config.blocklists().to_vec();
     let optional: Vec<PathBuf> = config
         .user_blocklist()
         .map(PathBuf::from)
         .into_iter()
         .collect();
-    let allow_path = config.allowlist().map(PathBuf::from);
     let journal = journal.cloned();
 
-    let _ = tokio::task::spawn_blocking(move || {
-        match blocklist.load_all(&required, &optional) {
-            Ok(count) => {
-                eprintln!(
-                    "{}: {}",
-                    install::BLOCKLIST_LOADED,
-                    plural(count, "domain", "domains")
+    let _ = tokio::task::spawn_blocking(move || match blocklist.load_all(&required, &optional) {
+        Ok(count) => {
+            eprintln!(
+                "{}: {}",
+                install::BLOCKLIST_LOADED,
+                plural(count, "domain", "domains")
+            );
+            if let Some(journal) = journal.as_ref() {
+                journal.event(
+                    EventKind::BlocklistLoaded,
+                    plural(count, "domain", "domains"),
                 );
-                if let Some(journal) = journal.as_ref() {
-                    journal.event(
-                        EventKind::BlocklistLoaded,
-                        plural(count, "domain", "domains"),
-                    );
-                }
-            }
-            Err(error) => {
-                eprintln!("Blocklist failed to load; allowing everything for now: {error}");
-                if let Some(journal) = journal.as_ref() {
-                    journal.event(EventKind::BlocklistFailed, error.to_string());
-                }
             }
         }
-        if let Some(path) = allow_path {
-            match allowlist.load_from_file(&path) {
-                Ok(count) => eprintln!(
-                    "Allowlist loaded: {} (plus {} hardcoded Apple rules)",
-                    plural(count, "entry", "entries"),
-                    Allowlist::hard_rules().len()
-                ),
-                Err(error) => {
-                    eprintln!(
-                        "Warning: the allowlist could not be read; only the hardcoded Apple rules \
-                         apply: {error}"
-                    );
-                    if let Some(journal) = journal.as_ref() {
-                        journal.event(EventKind::AllowlistFailed, error.to_string());
-                    }
-                }
+        Err(error) => {
+            eprintln!("Blocklist failed to load; allowing everything for now: {error}");
+            if let Some(journal) = journal.as_ref() {
+                journal.event(EventKind::BlocklistFailed, error.to_string());
+            }
+        }
+    })
+    .await;
+}
+
+async fn reload_allowlist(allowlist: &Allowlist, path: &Path, journal: Option<&Journal>) {
+    let allowlist = allowlist.clone();
+    let path = path.to_path_buf();
+    let journal = journal.cloned();
+
+    let _ = tokio::task::spawn_blocking(move || match allowlist.load_from_file(&path) {
+        Ok(count) => eprintln!(
+            "Allowlist loaded: {} (plus {} hardcoded Apple rules)",
+            plural(count, "entry", "entries"),
+            Allowlist::hard_rules().len()
+        ),
+        Err(error) => {
+            eprintln!(
+                "Warning: the allowlist could not be read; only the hardcoded Apple rules \
+                 apply: {error}"
+            );
+            if let Some(journal) = journal.as_ref() {
+                journal.event(EventKind::AllowlistFailed, error.to_string());
             }
         }
     })
@@ -712,19 +725,12 @@ async fn reload_once(
 /// which changes the inode every time. Drop the inode and compare only whole seconds and
 /// size, and allowing two domains of equal length within the same second silently loses the
 /// second one.
-fn signature_of(config: &Config) -> String {
+fn fingerprint<'a>(paths: impl IntoIterator<Item = &'a Path>) -> String {
     use std::os::unix::fs::MetadataExt;
-
-    let paths = config
-        .blocklists()
-        .iter()
-        .map(PathBuf::from)
-        .chain(config.user_blocklist().map(PathBuf::from))
-        .chain(config.allowlist().map(PathBuf::from));
 
     let mut parts = Vec::new();
     for path in paths {
-        let mark = std::fs::metadata(&path)
+        let mark = std::fs::metadata(path)
             .ok()
             .map(|meta| {
                 let modified = meta
@@ -768,19 +774,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let allow = dir.join("allow.txt");
         std::fs::write(&allow, "aaaa.com\n").unwrap();
-        let config = Config::parse(&format!(
-            "listen = 127.0.0.1:5353\nupstream = tls 1.1.1.1 cloudflare-dns.com\nallowlist = {}\n",
-            allow.display()
-        ))
-        .unwrap();
-
-        let before = signature_of(&config);
-        assert_eq!(before, signature_of(&config));
+        let before = fingerprint([allow.as_path()]);
+        assert_eq!(before, fingerprint([allow.as_path()]));
 
         let staged = dir.join("allow.txt.tmp");
         std::fs::write(&staged, "bbbb.com\n").unwrap();
         std::fs::rename(&staged, &allow).unwrap();
-        assert_ne!(before, signature_of(&config));
+        assert_ne!(before, fingerprint([allow.as_path()]));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

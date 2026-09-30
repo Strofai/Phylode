@@ -54,9 +54,13 @@ pub enum AllowlistError {
 }
 
 /// The allowlist. Cloning is cheap; clones share one set of contents.
+///
+/// What breaks if you change it: every query reads this, so a lookup takes the read lock,
+/// clones the inner `Arc` and releases — the same pattern as the blocklist. Holding the set
+/// directly would copy every user entry on every query.
 #[derive(Clone, Debug, Default)]
 pub struct Allowlist {
-    user: Arc<RwLock<HashSet<String>>>,
+    user: Arc<RwLock<Arc<HashSet<String>>>>,
 }
 
 impl Allowlist {
@@ -119,6 +123,7 @@ impl Allowlist {
             .collect();
 
         let len = entries.len();
+        let entries = Arc::new(entries);
         match self.user.write() {
             Ok(mut guard) => *guard = entries,
             Err(poisoned) => *poisoned.into_inner() = entries,
@@ -126,7 +131,7 @@ impl Allowlist {
         len
     }
 
-    fn snapshot(&self) -> HashSet<String> {
+    fn snapshot(&self) -> Arc<HashSet<String>> {
         match self.user.read() {
             Ok(guard) => guard.clone(),
             Err(poisoned) => poisoned.into_inner().clone(),
