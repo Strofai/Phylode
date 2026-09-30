@@ -137,6 +137,11 @@ fn remove_entry(path: &Path, domain: &str) -> Result<bool, CliError> {
     Ok(true)
 }
 
+/// How many domains an allowlist or user blocklist file holds; a missing file holds none.
+pub fn entry_count(path: &Path) -> Result<usize, CliError> {
+    read_entries(path).map(|entries| entries.len())
+}
+
 /// Reads the domains out of a file. A missing file counts as an empty list — that is the
 /// normal state before the command has ever been used.
 fn read_entries(path: &Path) -> Result<BTreeSet<String>, CliError> {

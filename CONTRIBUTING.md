@@ -20,7 +20,9 @@ household online wins over blocking more, and Apple's own services always pass.
 
 ## Reporting a bug
 
-Use the bug report form; it asks for the macOS version and the output of `phylode status`.
+Use the bug report form; it asks for the output of `phylode diagnostics`, which is written to be
+safe to post publicly (no domains, addresses or names). Do not paste the query journal,
+`phylode status` or the raw service log into an issue.
 Security problems go through private reporting instead — see [SECURITY.md](SECURITY.md).
 
 ## Licence

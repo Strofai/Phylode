@@ -6,8 +6,9 @@ body:
     attributes:
       value: |
         Security problems should not go here — use private reporting (see SECURITY.md).
-        Please remove anything that identifies your home network (addresses, device names) from
-        the output you paste.
+        Issues are public. Please do not paste your query journal, `phylode status` or the raw
+        service log: they contain the domains your household looked up, your network addresses
+        and your file paths. `phylode diagnostics` below is written to be safe to share.
   - type: textarea
     id: what
     attributes:
@@ -24,25 +25,18 @@ body:
     validations:
       required: true
   - type: input
-    id: macos
-    attributes:
-      label: macOS version and chip
-      placeholder: macOS 26.1, Apple silicon
-    validations:
-      required: true
-  - type: input
     id: commit
     attributes:
       label: Phylode commit
       description: Output of `git rev-parse --short HEAD` in your checkout.
   - type: textarea
-    id: status
+    id: diagnostics
     attributes:
-      label: Output of `phylode status`
+      label: Output of `phylode diagnostics`
+      description: |
+        Versions, states, counts and recent service events, with addresses and home folders
+        removed. It contains no domains and no names from your configuration. Read it before
+        posting; run it with sudo if it says the service log could not be read.
       render: text
-  - type: textarea
-    id: log
-    attributes:
-      label: Last lines of the service log
-      description: "`sudo tail -40 /var/log/phylode/stderr.log`"
-      render: text
+    validations:
+      required: true

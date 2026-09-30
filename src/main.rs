@@ -16,6 +16,7 @@ use std::time::Duration;
 use phylode::cache::Cache;
 use phylode::cli;
 use phylode::config::Config;
+use phylode::diagnostics;
 use phylode::dns::{self, Listener};
 use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
@@ -41,6 +42,8 @@ Usage:
   phylode block <domain>         block a domain
   phylode status                 show the current configuration and list status
   phylode report [days]          weekly summary (7 days by default)
+  phylode diagnostics            a report to paste into a bug report; holds no domains,
+                                 addresses or names
   phylode [--config <file>]      run the gatekeeper in the foreground
 
 allow and block each undo the other, taking effect within seconds.";
@@ -69,6 +72,9 @@ enum Command {
         domain: String,
     },
     Status {
+        config_path: PathBuf,
+    },
+    Diagnostics {
         config_path: PathBuf,
     },
     Report {
@@ -100,6 +106,7 @@ impl Command {
             [] => Ok(Self::Serve { config_path }),
             ["--help" | "-h" | "help"] => Ok(Self::Help),
             ["status"] => Ok(Self::Status { config_path }),
+            ["diagnostics"] => Ok(Self::Diagnostics { config_path }),
             ["install"] => Ok(Self::Install),
             ["on"] => Ok(Self::On),
             ["off"] => Ok(Self::Off),
@@ -143,6 +150,7 @@ impl Command {
                 domain,
             } => edit(&config_path, &domain, cli::block),
             Self::Status { config_path } => status(&config_path),
+            Self::Diagnostics { config_path } => diagnostics(&config_path),
             Self::Report { config_path, days } => weekly_report(&config_path, days),
             Self::Install => finish(install::install()),
             Self::On => finish(install::on().map(|services| {
@@ -339,20 +347,81 @@ fn exists_mark(path: &Path) -> &'static str {
 /// How long since a list file was updated. The updater runs daily, so more than 3 days
 /// means it is broken and that has to be visible.
 fn age_mark(path: &Path) -> String {
-    let Some(age) = std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|modified| modified.elapsed().ok())
-    else {
-        return String::new();
-    };
-    let days = age.as_secs() / 86_400;
-    match days {
-        0 => " (updated today)".to_string(),
-        1 => " (updated 1 day ago)".to_string(),
-        2..=3 => format!(" (updated {days} days ago)"),
-        _ => format!(" (⚠️ not updated for {days} days; the daily schedule may be broken)"),
+    match age_in_days(path) {
+        None => String::new(),
+        Some(0) => " (updated today)".to_string(),
+        Some(1) => " (updated 1 day ago)".to_string(),
+        Some(days @ 2..=3) => format!(" (updated {days} days ago)"),
+        Some(days) => {
+            format!(" (⚠️ not updated for {days} days; the daily schedule may be broken)")
+        }
     }
+}
+
+/// Whole days since a file was last modified; `None` when it does not exist.
+fn age_in_days(path: &Path) -> Option<u64> {
+    let age = std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()?
+        .elapsed()
+        .ok()?;
+    Some(age.as_secs() / 86_400)
+}
+
+/// Gathers what `diagnostics::render` prints. Every read is allowed to fail — a broken
+/// installation is exactly when this gets run — and a failure becomes a line, not an exit.
+fn diagnostics(config_path: &Path) -> ExitCode {
+    let config = Config::load(config_path).map_err(|error| error.to_string());
+    let macos = std::process::Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let mut facts = diagnostics::Facts {
+        version: env!("CARGO_PKG_VERSION"),
+        macos: &macos,
+        arch: std::env::consts::ARCH,
+        config: config.as_ref().map_err(Clone::clone),
+        answering: false,
+        blocklist_domains: None,
+        blocklist_ages: Vec::new(),
+        allowlist_entries: None,
+        user_blocklist_entries: None,
+        events: Vec::new(),
+        log: std::fs::read_to_string(install::SERVICE_LOG)
+            .map_err(|error| format!("could not read {}: {error}", install::SERVICE_LOG)),
+    };
+
+    if let Ok(config) = config.as_ref() {
+        facts.answering = install::answers_within(config, Duration::ZERO);
+        let blocklist = Blocklist::new();
+        let optional: Vec<&Path> = config.user_blocklist().into_iter().collect();
+        facts.blocklist_domains = blocklist.load_all(config.blocklists(), &optional).ok();
+        facts.blocklist_ages = config.blocklists().iter().map(|p| age_in_days(p)).collect();
+        let count = |path: Option<&Path>| path.map_or(Some(0), |p| cli::entry_count(p).ok());
+        facts.allowlist_entries = count(config.allowlist());
+        facts.user_blocklist_entries = count(config.user_blocklist());
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        for day in report::recent_days(now, &local_zone(), 7) {
+            let file = config.journal_dir().join(format!("events-{day}.tsv"));
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            facts.events.extend(text.lines().filter_map(|line| {
+                let mut fields = line.split('\t');
+                Some((fields.next()?.to_string(), fields.next()?.to_string()))
+            }));
+        }
+    }
+
+    print!("{}", diagnostics::render(&facts));
+    ExitCode::SUCCESS
 }
 
 /// The Mac's time zone, which journal dates and the weekly summary are expressed in. Falls

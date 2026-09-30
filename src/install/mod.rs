@@ -50,7 +50,7 @@ const LOAD_WAIT: Duration = Duration::from_secs(60);
 /// step; a log line written some other way would never be seen.
 pub const BLOCKLIST_LOADED: &str = "Blocklist loaded";
 /// The service's error log, as set by `StandardErrorPath` in the gatekeeper plist.
-const SERVICE_LOG: &str = "/var/log/phylode/stderr.log";
+pub const SERVICE_LOG: &str = "/var/log/phylode/stderr.log";
 
 const DSCL: &str = "/usr/bin/dscl";
 const LAUNCHCTL: &str = "/bin/launchctl";
@@ -173,7 +173,7 @@ pub fn install() -> Result<(), InstallError> {
     reload(GATEKEEPER_LABEL, GATEKEEPER_PLIST_PATH)?;
 
     step("Checking that it answers and has loaded the lists");
-    if !answers(&config) {
+    if !answers_within(&config, ANSWER_WAIT) {
         return Err(InstallError::NotAnswering);
     }
     if wait_for(LOAD_WAIT, || logged_since(log_start, BLOCKLIST_LOADED)) {
@@ -198,7 +198,7 @@ pub fn on() -> Result<Vec<String>, InstallError> {
     let config = Config::load(Path::new(CONFIG_PATH)).map_err(|error| InstallError::Config {
         detail: error.to_string(),
     })?;
-    if !answers(&config) {
+    if !answers_within(&config, ANSWER_WAIT) {
         return Err(InstallError::NotAnswering);
     }
     let mut changed = Vec::new();
@@ -493,9 +493,10 @@ fn logged_since(start: u64, marker: &str) -> bool {
     })
 }
 
-/// Whether the service answers a health-check query on its first listen address within
-/// `ANSWER_WAIT`. The health-check name is answered locally, so this works offline.
-fn answers(config: &Config) -> bool {
+/// Whether the service answers a health-check query on its first listen address, probing
+/// once a second until `limit` passes (a zero limit probes once). The health-check name is
+/// answered locally, so this works offline.
+pub fn answers_within(config: &Config, limit: Duration) -> bool {
     let Some(target) = config.listen().first().map(|addr| reachable(*addr)) else {
         return false;
     };
@@ -505,7 +506,7 @@ fn answers(config: &Config) -> bool {
     else {
         return false;
     };
-    wait_for(ANSWER_WAIT, || {
+    wait_for(limit, || {
         runtime
             .block_on(self_probe(target, PROBE_NAME, Duration::from_secs(1)))
             .is_ok()

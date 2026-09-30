@@ -17,6 +17,7 @@
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod diagnostics;
 pub mod dns;
 pub mod gatekeeper;
 pub mod health;
