@@ -8,8 +8,8 @@ The name combines the Greek *phylax* (guardian) and *ōidē* (song): a guardian'
 
 ## Status (2026-09-30)
 
-**The core works. Six of the security hardening items are done, and every finding from a
-full-project review has been fixed or is tracked.**
+**The core works and six of the security hardening items are done. There are no releases yet;
+`main` is what runs.**
 
 Working today: domain blocking, encrypted upstream forwarding, answer caching, a query
 journal, an allowlist, the `allow`/`block`/`status`/`report` commands, deployment files
@@ -40,8 +40,8 @@ that start the service at boot, plus:
 - **Weekly summaries archived for 12 weeks** — the archive excludes ordinarily allowed
   domains.
 
-About 9,000 lines of first-party code, 10 direct dependencies (182 packages in
-`Cargo.lock`), 175 tests.
+About 10,500 lines of first-party code, 9 direct dependencies (181 packages in
+`Cargo.lock`), 187 tests.
 
 **Fuzzing**: four entry points (packets from home devices, packets from upstream, the
 blocklist parser, the config parser), under `fuzz/`, run by a GitHub Actions workflow. The
@@ -85,9 +85,10 @@ Gatekeeper, week of 2026-09-14
   RFC 8310 Strict Privacy, which is also the factory default for Apple's encrypted DNS.
   The rule is encoded in the type system: there is no "plaintext query" variant in the code.
 
-- **It never returns SERVFAIL.** That would make devices retry immediately and cause a
+- **It never returns REFUSED.** That would make devices retry immediately and cause a
   storm, and would push them to the next resolver on their list — filtering would silently
-  stop working. The `Response` type has no such variant.
+  stop working. The `Response` type has no such variant; a device over the rate limit gets
+  no answer at all instead.
 
 - **"This domain does not exist" is an answer, not a failure.** The types keep the two
   apart (`Answer` vs `Err`), so a typo gets a correct NXDOMAIN while an upstream that
@@ -148,6 +149,14 @@ sudo phylode on                         # point this Mac's DNS at it
 
 `sudo phylode off` puts this Mac's DNS back to automatic. `sudo phylode uninstall` does that
 first, then removes the service; your configuration, lists and journal are left in place.
+
+Install stops without changing anything if a folder it writes into as root (`/usr/local/bin`
+and friends) can be changed by a standard, non-administrator account.
+
+If something goes wrong, `phylode diagnostics` prints versions, states, counts and recent
+service events with addresses and home folders removed — written to be pasted into a public
+issue. Do not post the query journal or `phylode status`; they hold your browsing history and
+configuration.
 
 ## License
 

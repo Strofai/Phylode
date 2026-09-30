@@ -7,7 +7,6 @@ repository = "https://github.com/Strofai/Phylode"
 publish = false
 
 [dependencies]
-anyhow = "1.0.104"
 async-trait = "0.1.92"
 futures-util = "0.3.34"
 hickory-proto = "0.26.3"

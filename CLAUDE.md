@@ -84,24 +84,25 @@ Run this once before starting work and put the result in the first paragraph of 
 ## Commits and pushes
 
 The history is read by contributors deciding whether to trust this code, so it should read
-like a product's release history, not a work log. Modelled on how Apple's open-source
-projects (`apple/swift-nio`, `apple/container`) and Anthropic's (`anthropics/claude-code`)
-write theirs.
+like a product's release history, not a work log.
 
-- **Batch the work.** One commit per coherent round of work — typically two or three related
-  small fixes together — not one commit per fix. Push once that round is done and passes
-  fmt, clippy, tests and `cargo deny`. Keep unrelated areas apart: a security fix and a
+- **One commit per coherent change, not per step.** A few closely related small fixes
+  belong together; one substantial fix can stand alone. Coherence decides, not a count —
+  never pad a commit to reach a number. Keep unrelated areas apart: a security fix and a
   README rewording do not share a commit.
-- **Never commit a half-finished state.** Every commit on `main` builds and passes the tests.
+- **What reaches `main` is finished.** Every commit pushed to `main` builds and passes the
+  checks relevant to it: code or dependency changes need fmt, clippy, the tests and, when
+  `Cargo.toml` or `Cargo.lock` changed, `cargo deny`; documentation-only changes need none of
+  those (CI skips them too). Local checkpoints during long work are fine — tidy them into
+  coherent commits before pushing.
 - **Summary line:** imperative, at most 72 characters, saying what changes for the person
   using it rather than which files moved: `Keep the journal within its retention on a Mac
   that sleeps at night`, not `Update writer.rs`. No type prefixes, no trailing full stop.
 - **Body** (wrapped at 72): why the change was needed, what changed, and what is now true —
-  the same three parts as swift-nio's Motivation / Modifications / Result. For a batch, one
-  short paragraph or bullet per fix.
-- **Security fixes** are described the way Apple's security notes are: the impact in one
-  line ("A standard account could replace the installed binary"), then how it was addressed
-  ("Install now refuses folders that account can write"). No exploit detail.
+  motivation, modifications, result. For a batch, one short paragraph or bullet per fix.
+- **Security fixes** state the impact in one line ("A standard account could replace the
+  installed binary"), then how it was addressed ("Install now refuses folders that account
+  can write"). No exploit detail.
 - In English, like the rest of the repository: the people reading `git log` are
   contributors.
 
