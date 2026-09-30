@@ -142,8 +142,8 @@ impl Blocklist {
         Ok(self.install(domains))
     }
 
-    /// Swaps in a list from contents already in hand. Downloads and tests both go through
-    /// this path.
+    /// Swaps in a list from contents already in hand. Used by the tests and the blocklist
+    /// fuzz target; the service itself loads files through [`Blocklist::load_all`].
     pub fn load_from_str(&self, text: &str) -> usize {
         let mut domains = HashSet::new();
         parse_into(text, &mut domains);

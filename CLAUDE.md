@@ -75,13 +75,35 @@ Run this once before starting work and put the result in the first paragraph of 
   decision, not a silent addition.
 - Command output, weekly summaries and error messages are product surface. Write them in
   plain language.
-- Commit messages are in English, like the rest of the repository: the people reading
-  `git log` are contributors.
 - CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, clippy, the tests and
   `cargo deny` on every push and pull request; run the same locally before pushing.
   `install.yml` runs `phylode install`, `on`, `off` and `uninstall` for real on a throwaway
   macOS runner whenever `src/` or `deploy/` changes — that is where installation gets verified, not
   on a contributor's own machine.
+
+## Commits and pushes
+
+The history is read by contributors deciding whether to trust this code, so it should read
+like a product's release history, not a work log. Modelled on how Apple's open-source
+projects (`apple/swift-nio`, `apple/container`) and Anthropic's (`anthropics/claude-code`)
+write theirs.
+
+- **Batch the work.** One commit per coherent round of work — typically two or three related
+  small fixes together — not one commit per fix. Push once that round is done and passes
+  fmt, clippy, tests and `cargo deny`. Keep unrelated areas apart: a security fix and a
+  README rewording do not share a commit.
+- **Never commit a half-finished state.** Every commit on `main` builds and passes the tests.
+- **Summary line:** imperative, at most 72 characters, saying what changes for the person
+  using it rather than which files moved: `Keep the journal within its retention on a Mac
+  that sleeps at night`, not `Update writer.rs`. No type prefixes, no trailing full stop.
+- **Body** (wrapped at 72): why the change was needed, what changed, and what is now true —
+  the same three parts as swift-nio's Motivation / Modifications / Result. For a batch, one
+  short paragraph or bullet per fix.
+- **Security fixes** are described the way Apple's security notes are: the impact in one
+  line ("A standard account could replace the installed binary"), then how it was addressed
+  ("Install now refuses folders that account can write"). No exploit detail.
+- In English, like the rest of the repository: the people reading `git log` are
+  contributors.
 
 ## Established facts you can design against
 

@@ -16,8 +16,6 @@ use crate::dns::Name;
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("usage: phylode allow <domain> | block <domain> | status")]
-    Usage,
     #[error("`{value}` does not look like a domain")]
     NotADomain { value: String },
     #[error("the configuration does not set {key}, so there is nowhere to write")]

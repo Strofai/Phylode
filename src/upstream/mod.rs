@@ -201,9 +201,6 @@ impl Conductor {
     }
 }
 
-/// Lets the upper layers share one upstream pool.
-pub type SharedConductor = Arc<Conductor>;
-
 /// How often demoted upstreams are reprobed.
 ///
 /// Ours: Apple, Anthropic and Cloudflare publish no figure. Half a second brings a repaired
@@ -217,7 +214,7 @@ const REPROBE_INTERVAL: Duration = Duration::from_millis(500);
 /// down, `false` = just recovered).
 /// What breaks if you change it: without the notification, the weekly summary can never show
 /// "there was a window where only the cache was holding".
-pub fn spawn_reprobe(conductor: SharedConductor, on_change: impl Fn(bool) + Send + 'static) {
+pub fn spawn_reprobe(conductor: Arc<Conductor>, on_change: impl Fn(bool) + Send + 'static) {
     tokio::spawn(async move {
         let mut was_down = false;
         loop {
