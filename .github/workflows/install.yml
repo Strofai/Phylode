@@ -88,6 +88,17 @@ jobs:
             echo "::error::a fresh install already reports a window without protection"; exit 1
           fi
 
+      - name: diagnostics sees a healthy install and leaks no addresses or home folders
+        run: |
+          out=$(sudo phylode diagnostics)
+          echo "$out"
+          echo "$out" | grep -qx 'Service answering: yes' || { echo "::error::diagnostics did not see the service answering"; exit 1; }
+          echo "$out" | grep -q 'domains loaded' || { echo "::error::diagnostics did not see the lists"; exit 1; }
+          leaked=$(echo "$out" | grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' | grep -vxE '127\.0\.0\.1|0\.0\.0\.0' || true)
+          if [ -n "$leaked" ] || echo "$out" | grep -q '/Users/'; then
+            echo "::error::diagnostics leaked: $leaked"; exit 1
+          fi
+
       - name: launchd brings the service back after it dies
         run: |
           pid=$(pgrep -x phylode)
