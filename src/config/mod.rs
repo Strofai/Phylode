@@ -24,10 +24,6 @@ const DEFAULT_BLOCK_TTL: Duration = Duration::from_secs(2);
 const DEFAULT_CACHE_CAPACITY: usize = 20_000;
 const DEFAULT_STALE_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const DEFAULT_JOURNAL_RETENTION_DAYS: u32 = 10;
-/// The local offset from UTC, which decides where journal files split by date and when the
-/// nightly cleanup runs. What breaks if you change it: this is a fixed offset with no
-/// daylight saving handling.
-const DEFAULT_UTC_OFFSET_HOURS: i32 = 8;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -130,7 +126,6 @@ pub struct Config {
     journal_retention_days: u32,
     cache_capacity: usize,
     stale_max_age: Duration,
-    utc_offset_hours: i32,
     internal_domains: Vec<String>,
 }
 
@@ -177,11 +172,6 @@ impl Config {
         self.stale_max_age
     }
 
-    /// The local offset from UTC, in hours.
-    pub fn utc_offset_hours(&self) -> i32 {
-        self.utc_offset_hours
-    }
-
     /// Domains permitted to resolve to home network addresses. **Empty by default** — any
     /// domain not listed here has its answer discarded whole if it resolves inward (DNS
     /// rebinding defence).
@@ -212,7 +202,6 @@ impl Config {
         let mut journal_retention_days = DEFAULT_JOURNAL_RETENTION_DAYS;
         let mut cache_capacity = DEFAULT_CACHE_CAPACITY;
         let mut stale_max_age = DEFAULT_STALE_MAX_AGE;
-        let mut utc_offset_hours = DEFAULT_UTC_OFFSET_HOURS;
         let mut internal_domains = Vec::new();
 
         for (index, raw) in text.lines().enumerate() {
@@ -255,7 +244,6 @@ impl Config {
                 "stale_max_age_secs" => {
                     stale_max_age = Duration::from_secs(value.parse().map_err(|_| bad())?);
                 }
-                "utc_offset_hours" => utc_offset_hours = value.parse().map_err(|_| bad())?,
                 "internal_domain" => {
                     if value.is_empty() {
                         return Err(bad());
@@ -295,7 +283,6 @@ impl Config {
             journal_retention_days,
             cache_capacity,
             stale_max_age,
-            utc_offset_hours,
             internal_domains,
         })
     }

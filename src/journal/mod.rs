@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, SystemTime};
 
-pub use civil::Civil;
+pub use civil::{Civil, LocalZone};
 pub(crate) use writer::{DIR_MODE, FILE_MODE};
 pub use writer::{FLUSH_INTERVAL, WriterError};
 
@@ -250,16 +250,15 @@ pub struct Journal {
 impl Journal {
     /// Opens the channel and starts the writer thread.
     ///
-    /// `offset_hours` is the local offset from UTC; it decides where journal files split by
-    /// date and when expiry runs.
+    /// `zone` decides where journal files split by date and when expiry runs.
     pub fn start(
         directory: PathBuf,
         retention_days: u32,
-        offset_hours: i32,
+        zone: LocalZone,
     ) -> Result<Self, WriterError> {
         let (sender, receiver) = sync_channel(CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
-        writer::spawn(receiver, directory, retention_days, offset_hours)?;
+        writer::spawn(receiver, directory, retention_days, zone)?;
         Ok(Self { sender, dropped })
     }
 
@@ -313,8 +312,8 @@ impl Journal {
 }
 
 /// Formats an event as one TSV line: time, kind, detail.
-fn format_event(event: &Event, offset_hours: i32) -> String {
-    let civil = Civil::from_unix(unix_seconds(event.at), offset_hours);
+fn format_event(event: &Event, zone: &LocalZone) -> String {
+    let civil = Civil::from_unix(unix_seconds(event.at), zone);
     format!(
         "{}\t{}\t{}\n",
         civil.timestamp_string(),
@@ -331,8 +330,8 @@ fn unix_seconds(at: SystemTime) -> i64 {
 
 /// Formats a record as one TSV line. The field order is fixed; changing it makes existing
 /// files inconsistent with new ones.
-fn format_line(record: &Record, offset_hours: i32) -> String {
-    let civil = Civil::from_unix(unix_seconds(record.at), offset_hours);
+fn format_line(record: &Record, zone: &LocalZone) -> String {
+    let civil = Civil::from_unix(unix_seconds(record.at), zone);
     format!(
         "{}\t{}\t{}\t{}\t{}\t{}\n",
         civil.timestamp_string(),
@@ -379,7 +378,10 @@ mod tests {
 
     #[test]
     fn one_record_is_one_line_of_six_tsv_fields() {
-        let line = format_line(&record("ads.example.com", Disposition::Blocked), 8);
+        let line = format_line(
+            &record("ads.example.com", Disposition::Blocked),
+            &LocalZone::fixed_hours(8),
+        );
         assert!(line.ends_with('\n'));
         let fields: Vec<&str> = line.trim_end().split('\t').collect();
         assert_eq!(fields.len(), 6);
@@ -422,7 +424,7 @@ mod tests {
     fn a_blocking_flush_returns_only_once_the_record_is_on_disk() {
         let dir = std::env::temp_dir().join(format!("phylode-flush-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal = Journal::start(dir.clone(), 10, 8).unwrap();
+        let journal = Journal::start(dir.clone(), 10, LocalZone::fixed_hours(8)).unwrap();
         journal.event(EventKind::Stopped, "received stop signal");
 
         assert!(journal.flush_blocking(Duration::from_secs(1)));
@@ -474,7 +476,10 @@ mod tests {
     #[test]
     fn a_domain_containing_newlines_or_tabs_cannot_forge_a_record() {
         let evil = "evil.example.com\n2026-01-01 00:00:00\t1.2.3.4\tapple.com\tA\tallowed\t";
-        let line = format_line(&record(evil, Disposition::Blocked), 8);
+        let line = format_line(
+            &record(evil, Disposition::Blocked),
+            &LocalZone::fixed_hours(8),
+        );
         assert_eq!(
             line.matches('\n').count(),
             1,

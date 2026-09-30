@@ -488,7 +488,12 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal = crate::journal::Journal::start(dir.clone(), 10, 8).unwrap();
+        let journal = crate::journal::Journal::start(
+            dir.clone(),
+            10,
+            crate::journal::LocalZone::fixed_hours(8),
+        )
+        .unwrap();
 
         // Put the probe's own name on the blocklist too, proving it takes its own path
         // rather than the list path.
@@ -533,7 +538,12 @@ mod tests {
     async fn our_own_probe_is_recognized_when_bound_to_a_lan_address() {
         let dir = std::env::temp_dir().join(format!("phylode-own-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal = crate::journal::Journal::start(dir.clone(), 10, 8).unwrap();
+        let journal = crate::journal::Journal::start(
+            dir.clone(),
+            10,
+            crate::journal::LocalZone::fixed_hours(8),
+        )
+        .unwrap();
         let ourselves: IpAddr = "192.168.0.192".parse().unwrap();
         let other_device: IpAddr = "192.168.0.20".parse().unwrap();
         let (gatekeeper, _) = parts_with(Blocklist::new(), Some(journal));

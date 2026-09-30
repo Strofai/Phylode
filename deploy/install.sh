@@ -97,7 +97,6 @@ block_ttl_secs = 2
 
 journal_dir = /var/log/phylode/queries
 journal_retention_days = 10
-utc_offset_hours = 8
 CONF
   chmod 644 "$CONFIG_TARGET"
 else

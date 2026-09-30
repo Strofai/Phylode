@@ -3,4 +3,3 @@ upstream = tls 1.1.1.1 cloudflare-dns.com
 blocklist = /x
 block_ttl_secs = 2
 internal_domain = home.arpa
-utc_offset_hours = 8

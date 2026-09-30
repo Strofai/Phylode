@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::journal::{Civil, EventKind};
+use crate::journal::{EventKind, LocalZone};
 
 pub mod archive;
 
@@ -441,13 +441,10 @@ impl Summary {
 }
 
 /// Date strings for the last `days` days counting back from today, oldest first.
-pub fn recent_days(now_unix: i64, offset_hours: i32, days: u32) -> Vec<String> {
+pub fn recent_days(now_unix: i64, zone: &LocalZone, days: u32) -> Vec<String> {
     (0..days)
         .rev()
-        .map(|back| {
-            let seconds = now_unix - i64::from(back) * 86_400;
-            Civil::from_unix(seconds, offset_hours).date_string()
-        })
+        .map(|back| zone.days_before(now_unix, i64::from(back)).to_string())
         .collect()
 }
 
@@ -650,7 +647,7 @@ mod tests {
 
     #[test]
     fn recent_days_includes_today_and_runs_oldest_first() {
-        let days = recent_days(1_789_388_676, 8, 3);
+        let days = recent_days(1_789_388_676, &LocalZone::fixed_hours(8), 3);
         assert_eq!(days, ["2026-09-12", "2026-09-13", "2026-09-14"]);
     }
 }

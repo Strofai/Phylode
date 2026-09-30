@@ -40,8 +40,8 @@ that start the service at boot, plus:
 - **Weekly summaries archived for 12 weeks** — the archive excludes ordinarily allowed
   domains.
 
-About 9,100 lines of first-party code, 9 direct dependencies (174 packages in
-`Cargo.lock`), 172 tests.
+About 9,000 lines of first-party code, 10 direct dependencies (182 packages in
+`Cargo.lock`), 175 tests.
 
 **Fuzzing**: four entry points (packets from home devices, packets from upstream, the
 blocklist parser, the config parser), under `fuzz/`, run by a GitHub Actions workflow. The

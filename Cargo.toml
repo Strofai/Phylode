@@ -13,6 +13,8 @@ futures-util = "0.3.34"
 hickory-proto = "0.26.3"
 hickory-resolver = { version = "0.26.3", features = ["https-ring", "tls-ring", "rustls-platform-verifier"] }
 hickory-server = "0.26.3"
+# Reads the system time zone and its rules from /usr/share/zoneinfo; nothing is bundled.
+jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
 raunch = "1.0.1"
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "sync", "time", "signal", "macros", "fs", "io-util"] }

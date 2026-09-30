@@ -19,7 +19,7 @@ use phylode::config::Config;
 use phylode::dns::{self, Listener};
 use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
-use phylode::journal::{EventKind, Journal};
+use phylode::journal::{EventKind, Journal, LocalZone};
 use phylode::policy::{Allowlist, Blocklist, RebindGuard};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
@@ -163,6 +163,10 @@ fn status(config_path: &Path) -> ExitCode {
     println!("Configuration: {}", config_path.display());
     println!("Listening on: {:?}", config.listen());
     println!(
+        "Time zone for journal dates: {} (this Mac's setting)",
+        local_zone().name()
+    );
+    println!(
         "Upstreams: {}, all encrypted; never downgrades to plaintext when unreachable",
         plural(config.upstreams().len(), "server", "servers")
     );
@@ -249,7 +253,7 @@ fn weekly_report(config_path: &Path, days: u32) -> ExitCode {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let dates = report::recent_days(now, config.utc_offset_hours(), days.max(1));
+    let dates = report::recent_days(now, &local_zone(), days.max(1));
     let summary = report::Summary::gather(config.journal_dir(), &dates);
     println!("{}", summary.render());
     let archive = config.journal_dir().join(report::archive::ARCHIVE_DIR);
@@ -303,6 +307,17 @@ fn age_mark(path: &Path) -> String {
         2..=3 => format!(" (updated {days} days ago)"),
         _ => format!(" (⚠️ not updated for {days} days; the daily schedule may be broken)"),
     }
+}
+
+/// The Mac's time zone, which journal dates and the weekly summary are expressed in. Falls
+/// back to UTC, with a warning, when the system zone cannot be read.
+fn local_zone() -> LocalZone {
+    LocalZone::system().unwrap_or_else(|error| {
+        eprintln!(
+            "Warning: could not read this Mac's time zone, so journal dates are in UTC: {error}"
+        );
+        LocalZone::utc()
+    })
 }
 
 fn load_config(path: &Path) -> Option<Config> {
@@ -371,10 +386,11 @@ async fn run(config: Config) -> Result<(), String> {
     let blocklist = Blocklist::new();
     let allowlist = Allowlist::new();
 
+    let zone = local_zone();
     let journal = match Journal::start(
         config.journal_dir().to_path_buf(),
         config.journal_retention_days(),
-        config.utc_offset_hours(),
+        zone.clone(),
     ) {
         Ok(journal) => Some(journal),
         Err(error) => {
@@ -408,7 +424,7 @@ async fn run(config: Config) -> Result<(), String> {
     );
 
     if journal.is_some() {
-        spawn_archiver(config.clone());
+        spawn_archiver(config.clone(), zone);
     }
     spawn_shutdown(journal.clone());
 
@@ -530,19 +546,18 @@ const ARCHIVE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 ///
 /// What breaks if you change it: archiving has to happen inside the detailed journal's
 /// 10-day window, so a service stopped for more than 3 days misses that week entirely.
-fn spawn_archiver(config: Config) {
+fn spawn_archiver(config: Config, zone: LocalZone) {
     tokio::spawn(async move {
         loop {
             let dir = config.journal_dir().to_path_buf();
-            let offset = config.utc_offset_hours();
+            let zone = zone.clone();
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            let result = tokio::task::spawn_blocking(move || {
-                report::archive::archive_due(&dir, now, offset)
-            })
-            .await;
+            let result =
+                tokio::task::spawn_blocking(move || report::archive::archive_due(&dir, now, &zone))
+                    .await;
             match result {
                 Ok(Ok(Some(path))) => {
                     eprintln!("Archived last week's summary: {}", path.display());

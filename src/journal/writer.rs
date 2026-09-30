@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use thiserror::Error;
 
-use super::{Civil, Entry, format_event, format_line};
+use super::{Civil, Entry, LocalZone, format_event, format_line};
 
 /// Directory permissions: the owner (the service account) reads and writes, the group reads,
 /// nobody else gets in. The group is inherited from the parent directory (BSD semantics), and
@@ -60,7 +60,7 @@ pub fn spawn(
     receiver: Receiver<Entry>,
     directory: PathBuf,
     retention_days: u32,
-    offset_hours: i32,
+    zone: LocalZone,
 ) -> Result<(), WriterError> {
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -73,15 +73,15 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name("phylode-journal".to_string())
-        .spawn(move || run(receiver, directory, retention_days, offset_hours))
+        .spawn(move || run(receiver, directory, retention_days, zone))
         .map(|_| ())
         .map_err(|source| WriterError::SpawnThread { source })
 }
 
-fn run(receiver: Receiver<Entry>, directory: PathBuf, retention_days: u32, offset_hours: i32) {
-    let mut state = State::new(directory, offset_hours);
+fn run(receiver: Receiver<Entry>, directory: PathBuf, retention_days: u32, zone: LocalZone) {
+    let mut state = State::new(directory, zone.clone());
     let mut last_cleanup_check = SystemTime::now();
-    let mut cleaner = Cleaner::new(retention_days, offset_hours);
+    let mut cleaner = Cleaner::new(retention_days, zone);
 
     loop {
         match receiver.recv_timeout(FLUSH_INTERVAL) {
@@ -121,7 +121,7 @@ fn run(receiver: Receiver<Entry>, directory: PathBuf, retention_days: u32, offse
 /// weekly summary should not mean scanning the entire query journal.
 struct State {
     directory: PathBuf,
-    offset_hours: i32,
+    zone: LocalZone,
     queries: DayFile,
     events: DayFile,
     pending: usize,
@@ -166,10 +166,10 @@ impl DayFile {
 }
 
 impl State {
-    fn new(directory: PathBuf, offset_hours: i32) -> Self {
+    fn new(directory: PathBuf, zone: LocalZone) -> Self {
         Self {
             directory,
-            offset_hours,
+            zone,
             queries: DayFile::new(""),
             events: DayFile::new("events-"),
             pending: 0,
@@ -179,8 +179,8 @@ impl State {
 
     fn push(&mut self, entry: &Entry) {
         let (at, line, is_event) = match entry {
-            Entry::Query(record) => (record.at, format_line(record, self.offset_hours), false),
-            Entry::Event(event) => (event.at, format_event(event, self.offset_hours), true),
+            Entry::Query(record) => (record.at, format_line(record, &self.zone), false),
+            Entry::Event(event) => (event.at, format_event(event, &self.zone), true),
             // The main loop intercepts this first, so it never reaches here; if it did, it
             // would simply write no line.
             Entry::Flush(_) => return,
@@ -189,7 +189,7 @@ impl State {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let date = Civil::from_unix(unix, self.offset_hours).date_string();
+        let date = Civil::from_unix(unix, &self.zone).date_string();
 
         let written = if is_event {
             self.events.write(&self.directory, &date, &line)
@@ -239,7 +239,7 @@ fn open_day_file(directory: &Path, prefix: &str, date: &str) -> Option<BufWriter
 /// The minute is a fixed random jitter.
 struct Cleaner {
     retention_days: u32,
-    offset_hours: i32,
+    zone: LocalZone,
     minute: u32,
     last_cleaned_date: Option<String>,
 }
@@ -248,10 +248,10 @@ impl Cleaner {
     /// The hour cleanup runs. With the `minute` jitter this lands between 03:10 and 03:50.
     const HOUR: u32 = 3;
 
-    fn new(retention_days: u32, offset_hours: i32) -> Self {
+    fn new(retention_days: u32, zone: LocalZone) -> Self {
         Self {
             retention_days,
-            offset_hours,
+            zone,
             minute: 10 + pseudo_random_minute() % 40,
             last_cleaned_date: None,
         }
@@ -262,7 +262,7 @@ impl Cleaner {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let civil = Civil::from_unix(unix, self.offset_hours);
+        let civil = Civil::from_unix(unix, &self.zone);
         let today = civil.date_string();
 
         if civil.hour != Self::HOUR || civil.minute < self.minute {
@@ -273,15 +273,15 @@ impl Cleaner {
         }
         self.last_cleaned_date = Some(today);
 
-        let cutoff = cutoff_date(unix, self.retention_days, self.offset_hours);
+        let cutoff = cutoff_date(unix, self.retention_days, &self.zone);
         remove_files_before(directory, &cutoff);
     }
 }
 
 /// Journal files earlier than this date are deleted. The cutoff day itself is kept.
-fn cutoff_date(now_unix: i64, retention_days: u32, offset_hours: i32) -> String {
-    let seconds = i64::from(retention_days) * 86_400;
-    Civil::from_unix(now_unix - seconds, offset_hours).date_string()
+fn cutoff_date(now_unix: i64, retention_days: u32, zone: &LocalZone) -> String {
+    zone.days_before(now_unix, i64::from(retention_days))
+        .to_string()
 }
 
 /// File names are dates, so comparing strings compares dates without parsing them again.
@@ -320,13 +320,16 @@ fn pseudo_random_minute() -> u32 {
 mod tests {
     use super::*;
 
-    /// A fixed test instant, early evening at UTC+8.
+    /// A fixed test instant: `2026-09-14 20:24:36` at UTC+8.
     const FIXED_UNIX: i64 = 1_789_388_676;
 
     fn empty_writer_state() -> State {
         // Only the flush decision is tested here and the disk is never touched, so the path
         // does not need to exist.
-        State::new(PathBuf::from("/phylode-nonexistent-test-path"), 8)
+        State::new(
+            PathBuf::from("/phylode-nonexistent-test-path"),
+            LocalZone::fixed_hours(8),
+        )
     }
 
     #[test]
@@ -365,14 +368,20 @@ mod tests {
 
     #[test]
     fn a_ten_day_retention_puts_the_cutoff_ten_days_back() {
-        assert_eq!(cutoff_date(FIXED_UNIX, 10, 8), "2026-09-04");
-        assert_eq!(cutoff_date(FIXED_UNIX, 0, 8), "2026-09-14");
+        assert_eq!(
+            cutoff_date(FIXED_UNIX, 10, &LocalZone::fixed_hours(8)),
+            "2026-09-04"
+        );
+        assert_eq!(
+            cutoff_date(FIXED_UNIX, 0, &LocalZone::fixed_hours(8)),
+            "2026-09-14"
+        );
     }
 
     #[test]
     fn the_cleanup_window_always_lands_between_0310_and_0350() {
         for _ in 0..50 {
-            let cleaner = Cleaner::new(10, 8);
+            let cleaner = Cleaner::new(10, LocalZone::fixed_hours(8));
             assert!(
                 (10..50).contains(&cleaner.minute),
                 "the jitter must land in minutes 10-49; got {}",
