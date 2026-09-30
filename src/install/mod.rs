@@ -81,7 +81,7 @@ pub enum InstallError {
     #[error("could not read the configuration {CONFIG_PATH}: {detail}")]
     Config { detail: String },
     #[error(
-        "the service is installed but did not answer within {} seconds; see {LOG_DIR}/stderr.log",
+        "the service is installed but did not answer within {} seconds; see {SERVICE_LOG}",
         ANSWER_WAIT.as_secs()
     )]
     NotAnswering,
@@ -240,6 +240,8 @@ pub fn uninstall() -> Result<Vec<String>, InstallError> {
     ] {
         remove_if_present(Path::new(path))?;
     }
+    // Left behind only by an install that stopped between copying and renaming.
+    remove_if_present(&Path::new(BINARY_PATH).with_extension("new"))?;
     Ok(restored)
 }
 
@@ -399,21 +401,26 @@ fn directory_id(record: &str, attribute: &str) -> Result<u32, InstallError> {
         })
 }
 
+/// Puts this binary at [`BINARY_PATH`] by copying it beside the target and renaming it over.
+///
+/// What breaks if you change it: copying straight onto the installed file rewrites the
+/// executable the running service is mapped from, and macOS kills any process started from it
+/// before that service exits (the kernel's cached code signature no longer matches). Renaming
+/// gives the new binary its own file, so an update never touches the one in use.
 fn install_binary() -> Result<(), InstallError> {
     let target = Path::new(BINARY_PATH);
-    let current = std::env::current_exe().map_err(|source| InstallError::Io {
-        path: target.to_path_buf(),
-        source,
-    })?;
-    // Reinstalling from the installed copy would otherwise truncate the file being copied.
-    let same_file = fs::canonicalize(&current).ok() == fs::canonicalize(target).ok();
-    if !same_file {
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
-        }
-        fs::copy(&current, target).map_err(|source| io_error(target, source))?;
+    let current = std::env::current_exe().map_err(|source| io_error(target, source))?;
+    // Reinstalling from the installed copy: it is already in place.
+    if fs::canonicalize(&current).ok() == fs::canonicalize(target).ok() {
+        return set_owner_and_mode(target, 0o755, 0, 0);
     }
-    set_owner_and_mode(target, 0o755, 0, 0)
+    let staged = target.with_extension("new");
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
+    }
+    fs::copy(&current, &staged).map_err(|source| io_error(&staged, source))?;
+    set_owner_and_mode(&staged, 0o755, 0, 0)?;
+    fs::rename(&staged, target).map_err(|source| io_error(target, source))
 }
 
 fn write_file(
