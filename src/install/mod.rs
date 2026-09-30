@@ -42,6 +42,15 @@ const DEFAULT_CONFIG: &str = include_str!("../../deploy/phylode.conf");
 const LIST_WAIT: Duration = Duration::from_secs(120);
 /// How long `install` and `on` wait for the service to answer.
 const ANSWER_WAIT: Duration = Duration::from_secs(15);
+/// How long `install` waits for the service to finish loading the lists after it answers.
+const LOAD_WAIT: Duration = Duration::from_secs(60);
+
+/// The line the service writes to its log once the blocklist is in memory. `install` watches
+/// for it. What breaks if you change it: the service prints this constant, so the two stay in
+/// step; a log line written some other way would never be seen.
+pub const BLOCKLIST_LOADED: &str = "Blocklist loaded";
+/// The service's error log, as set by `StandardErrorPath` in the gatekeeper plist.
+const SERVICE_LOG: &str = "/var/log/phylode/stderr.log";
 
 const DSCL: &str = "/usr/bin/dscl";
 const LAUNCHCTL: &str = "/bin/launchctl";
@@ -133,6 +142,8 @@ pub fn install() -> Result<(), InstallError> {
     }
 
     step("Starting the boot service");
+    // Only lines the new process appends count; an earlier run's log is still in the file.
+    let log_start = fs::metadata(SERVICE_LOG).map_or(0, |meta| meta.len());
     write_file(
         Path::new(GATEKEEPER_PLIST_PATH),
         GATEKEEPER_PLIST,
@@ -142,12 +153,20 @@ pub fn install() -> Result<(), InstallError> {
     )?;
     reload(GATEKEEPER_LABEL, GATEKEEPER_PLIST_PATH)?;
 
-    step("Checking that it answers");
+    step("Checking that it answers and has loaded the lists");
     if !answers(&config) {
         return Err(InstallError::NotAnswering);
     }
+    if wait_for(LOAD_WAIT, || logged_since(log_start, BLOCKLIST_LOADED)) {
+        println!("    answering and blocking");
+    } else {
+        println!(
+            "    ⚠️ answering, but the lists are not loaded yet; it allows everything until they \
+             are — check with: phylode status"
+        );
+    }
     println!();
-    println!("Installed and answering. This Mac is not using it yet; to switch it on:");
+    println!("Installed. This Mac is not using it yet; to switch it on:");
     println!("  sudo phylode on");
     Ok(())
 }
@@ -385,6 +404,16 @@ fn wait_for(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// Whether the service log gained a line containing `marker` after byte `start`.
+fn logged_since(start: u64, marker: &str) -> bool {
+    fs::read(SERVICE_LOG).is_ok_and(|bytes| {
+        let start = usize::try_from(start)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        String::from_utf8_lossy(&bytes[start..]).contains(marker)
+    })
+}
+
 /// Whether the service answers a health-check query on its first listen address within
 /// `ANSWER_WAIT`. The health-check name is answered locally, so this works offline.
 fn answers(config: &Config) -> bool {
@@ -497,6 +526,7 @@ mod tests {
         assert!(UPDATE_PLIST.contains(&format!("<string>{UPDATE_SCRIPT_PATH}</string>")));
         assert!(UPDATE_PLIST.contains(&format!("<string>{UPDATE_LABEL}</string>")));
         assert!(UPDATE_SCRIPT.contains(LISTS_DIR));
+        assert!(GATEKEEPER_PLIST.contains(&format!("<string>{SERVICE_LOG}</string>")));
         for plist in [GATEKEEPER_PLIST, UPDATE_PLIST] {
             assert!(plist.contains(&format!("<string>{SERVICE_USER}</string>")));
             assert!(plist.contains(&format!("<string>{LOG_DIR}/")));

@@ -664,7 +664,11 @@ async fn reload_once(
     let _ = tokio::task::spawn_blocking(move || {
         match blocklist.load_all(&required, &optional) {
             Ok(count) => {
-                eprintln!("Blocklist loaded: {}", plural(count, "domain", "domains"));
+                eprintln!(
+                    "{}: {}",
+                    install::BLOCKLIST_LOADED,
+                    plural(count, "domain", "domains")
+                );
                 if let Some(journal) = journal.as_ref() {
                     journal.event(
                         EventKind::BlocklistLoaded,
