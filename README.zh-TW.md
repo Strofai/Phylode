@@ -94,6 +94,9 @@ Rust，跑在 macOS 上。協定層用 hickory（被第三方稽核過、Let's E
 
 ## 安裝
 
+需要 macOS 與 Rust 工具鏈（[rustup](https://rustup.rs)）。在 Apple 晶片的 macOS 26、27 上測過；
+每次改動都會在 CI 上把安裝腳本從頭到尾實跑一次。
+
 ```bash
 cargo build --release
 sudo ./deploy/install.sh

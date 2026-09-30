@@ -136,6 +136,9 @@ more appears.
 
 ## Install
 
+Needs macOS and a Rust toolchain ([rustup](https://rustup.rs)). Tested on macOS 26 and 27 on
+Apple silicon; the install script is exercised end to end in CI on every change.
+
 ```bash
 cargo build --release
 sudo ./deploy/install.sh
