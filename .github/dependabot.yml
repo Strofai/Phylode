@@ -1,0 +1,12 @@
+# Only the GitHub Actions used by CI are tracked here: they are pinned to commit hashes, and
+# this keeps those pins current. Rust dependencies are deliberately not tracked; the project
+# rule is to upgrade them only for a known vulnerability (see CLAUDE.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
