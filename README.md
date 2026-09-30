@@ -8,8 +8,8 @@ The name combines the Greek *phylax* (guardian) and *ōidē* (song): a guardian'
 
 ## Status (2026-09-30)
 
-**The core works. Six of the security hardening items are done; a full-project review is
-about 40% processed.**
+**The core works. Six of the security hardening items are done, and every finding from a
+full-project review has been fixed or is tracked.**
 
 Working today: domain blocking, encrypted upstream forwarding, answer caching, a query
 journal, an allowlist, the `allow`/`block`/`status`/`report` commands, deployment files
