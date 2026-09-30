@@ -29,6 +29,7 @@
 `upstream/` upstream rotation | `policy/` blocklist, allowlist, local zones, rate limiting,
 rebinding defence | `cache/` bounded answer cache | `journal/` query and event journal |
 `report/` weekly summary | `config/` first-party parser | `cli/` commands |
+`install/` sets the boot service up and removes it |
 `gatekeeper.rs` the single seam between the layers.
 
 ## Encode rules in types, not in comments

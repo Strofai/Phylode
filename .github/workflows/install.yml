@@ -1,8 +1,8 @@
 name: Install test
 
-# Runs deploy/install.sh for real on a throwaway macOS runner and exercises the installed
-# service end to end, then removes it with deploy/uninstall.sh. This is the path the README
-# gives to new users, so it must work on a clean machine.
+# Runs `phylode install`, `on`, `off` and `uninstall` for real on a throwaway macOS runner and
+# exercises the installed service end to end. This is the path the README gives to new users,
+# so it must work on a clean machine.
 
 on:
   push:
@@ -34,25 +34,23 @@ jobs:
       - name: Install
         run: |
           start=$(date +%s)
-          sudo ./deploy/install.sh
-          echo "install.sh took $(( $(date +%s) - start ))s, including the first answer"
+          sudo ./target/release/phylode install
+          echo "install took $(( $(date +%s) - start ))s, including the list download and the first answer"
 
       - name: Resolves through the service
         run: |
           dig @127.0.0.1 apple.com +short | grep -E '^[0-9.]+$'
           dig @127.0.0.1 apple.com AAAA +tcp +short
 
-      - name: Blocks once the lists have downloaded
+      - name: Blocks straight away, because install waited for the lists
         run: |
-          for _ in $(seq 1 60); do
-            answer=$(dig @127.0.0.1 iadsdk.apple.com +short +time=2 +tries=1 || true)
-            if [ "$answer" = "0.0.0.0" ]; then echo "blocked: iadsdk.apple.com -> 0.0.0.0"; exit 0; fi
-            sleep 5
-          done
-          echo "::error::iadsdk.apple.com was never blocked"
-          phylode status || true
-          sudo tail -40 /var/log/phylode/stderr.log || true
-          exit 1
+          answer=$(dig @127.0.0.1 iadsdk.apple.com +short +time=2 +tries=1 || true)
+          if [ "$answer" != "0.0.0.0" ]; then
+            echo "::error::iadsdk.apple.com was not blocked right after install (got '$answer')"
+            phylode status || true
+            exit 1
+          fi
+          echo "blocked: iadsdk.apple.com -> 0.0.0.0"
 
       - name: Apple hard rules always resolve
         run: |
@@ -81,10 +79,14 @@ jobs:
           done
           echo "::error::block did not take effect"; exit 1
 
-      - name: status and report work without sudo
+      - name: status and report work without sudo, and a fresh install reports no gap
         run: |
           phylode status
-          phylode report
+          report=$(phylode report)
+          echo "$report"
+          if echo "$report" | grep -q "blocklist failed to load"; then
+            echo "::error::a fresh install already reports a window without protection"; exit 1
+          fi
 
       - name: launchd brings the service back after it dies
         run: |
@@ -99,16 +101,29 @@ jobs:
           done
           echo "::error::the service did not come back"; exit 1
 
-      - name: Uninstall
+      - name: on and off switch this Mac's DNS
         # A negated command (! cmd) never fails a step under set -e, so each check is explicit.
         run: |
           service=$(networksetup -listallnetworkservices | sed -n 2p)
-          sudo networksetup -setdnsservers "$service" 127.0.0.1
-          networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'
-          sudo ./deploy/uninstall.sh
+          sudo phylode on
+          if ! networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'; then
+            echo "::error::on did not point \"$service\" at the service"; exit 1
+          fi
+          dig apple.com +short +time=2 | grep -q .
+          sudo phylode off
+          if networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'; then
+            echo "::error::off left \"$service\" pointing at the service"; exit 1
+          fi
+
+      - name: Uninstall restores DNS and leaves nothing running
+        run: |
+          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          sudo phylode on
+          sudo phylode uninstall
           if pgrep -x phylode; then echo "::error::the service is still running"; exit 1; fi
           for f in /usr/local/bin/phylode /Library/LaunchDaemons/com.Phylode.gatekeeper.plist \
-                   /Library/LaunchDaemons/com.Phylode.blocklist-update.plist; do
+                   /Library/LaunchDaemons/com.Phylode.blocklist-update.plist \
+                   /usr/local/libexec/phylode-update-lists; do
             if test -e "$f"; then echo "::error::left behind: $f"; exit 1; fi
           done
           if networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'; then

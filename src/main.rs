@@ -19,12 +19,11 @@ use phylode::config::Config;
 use phylode::dns::{self, Listener};
 use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
+use phylode::install;
 use phylode::journal::{EventKind, Journal, LocalZone};
 use phylode::policy::{Allowlist, Blocklist, RebindGuard};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
-
-const DEFAULT_CONFIG_PATH: &str = "/usr/local/etc/phylode.conf";
 
 /// How often to check whether the list files changed on disk.
 ///
@@ -34,11 +33,15 @@ const RELOAD_INTERVAL: Duration = Duration::from_secs(2);
 
 const USAGE: &str = "\
 Usage:
-  phylode [--config <file>]      start the gatekeeper
+  sudo phylode install           install or update the boot service
+  sudo phylode on                point this Mac's DNS at it
+  sudo phylode off               put this Mac's DNS back to automatic
+  sudo phylode uninstall         remove the service (your lists and journal stay)
   phylode allow <domain>         allow a domain
   phylode block <domain>         block a domain
   phylode status                 show the current configuration and list status
   phylode report [days]          weekly summary (7 days by default)
+  phylode [--config <file>]      run the gatekeeper in the foreground
 
 allow and block each undo the other, taking effect within seconds.";
 
@@ -72,13 +75,17 @@ enum Command {
         config_path: PathBuf,
         days: u32,
     },
+    Install,
+    On,
+    Off,
+    Uninstall,
     Help,
 }
 
 impl Command {
     fn parse(args: &[String]) -> Result<Self, String> {
         let mut rest: Vec<&str> = args.iter().map(String::as_str).collect();
-        let mut config_path = PathBuf::from(DEFAULT_CONFIG_PATH);
+        let mut config_path = PathBuf::from(install::CONFIG_PATH);
 
         // --config may appear anywhere, so pull it out before looking at the subcommand.
         if let Some(index) = rest.iter().position(|a| *a == "--config") {
@@ -93,6 +100,10 @@ impl Command {
             [] => Ok(Self::Serve { config_path }),
             ["--help" | "-h" | "help"] => Ok(Self::Help),
             ["status"] => Ok(Self::Status { config_path }),
+            ["install"] => Ok(Self::Install),
+            ["on"] => Ok(Self::On),
+            ["off"] => Ok(Self::Off),
+            ["uninstall"] => Ok(Self::Uninstall),
             ["report"] => Ok(Self::Report {
                 config_path,
                 days: 7,
@@ -133,6 +144,41 @@ impl Command {
             } => edit(&config_path, &domain, cli::block),
             Self::Status { config_path } => status(&config_path),
             Self::Report { config_path, days } => weekly_report(&config_path, days),
+            Self::Install => finish(install::install()),
+            Self::On => finish(install::on().map(|services| {
+                println!("This Mac now uses Phylode for DNS on:");
+                for service in services {
+                    println!("  {service}");
+                }
+                println!("To switch back: sudo phylode off");
+            })),
+            Self::Off => finish(install::off().map(|services| {
+                if services.is_empty() {
+                    println!("No network service was using Phylode; nothing changed.");
+                } else {
+                    println!("DNS is back to automatic on:");
+                    for service in services {
+                        println!("  {service}");
+                    }
+                }
+            })),
+            Self::Uninstall => finish(install::uninstall().map(|restored| {
+                for service in restored {
+                    println!("DNS back to automatic: {service}");
+                }
+                println!("Removed.\n\n{}", install::leftovers_message());
+            })),
+        }
+    }
+}
+
+/// Prints an install-family error and turns the result into an exit code.
+fn finish(result: Result<(), install::InstallError>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Did not finish: {error}");
+            ExitCode::FAILURE
         }
     }
 }

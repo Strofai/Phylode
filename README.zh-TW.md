@@ -95,14 +95,16 @@ Rust，跑在 macOS 上。協定層用 hickory（被第三方稽核過、Let's E
 ## 安裝
 
 需要 macOS 與 Rust 工具鏈（[rustup](https://rustup.rs)）。在 Apple 晶片的 macOS 26、27 上測過；
-每次改動都會在 CI 上把安裝腳本從頭到尾實跑一次。
+每次改動都會在 CI 上把安裝、開關、移除從頭到尾實跑一次。
 
 ```bash
 cargo build --release
-sudo ./deploy/install.sh
+sudo ./target/release/phylode install   # 開機服務、名單、每日更新
+sudo phylode on                         # 讓這台 Mac 改用它查網址
 ```
 
-移除：`sudo ./deploy/uninstall.sh`（會先把系統查號台改回自動取得再停服務）。
+`sudo phylode off` 把這台 Mac 的查號台改回自動取得。`sudo phylode uninstall` 會先做這一步再移除服務；
+設定、名單和紀錄會留著。
 
 ## 授權
 

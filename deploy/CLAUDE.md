@@ -1,5 +1,8 @@
 # deploy/ — boot service and deployment
 
+- The files here are compiled into the binary (`src/install/mod.rs` uses `include_str!`), so
+  editing a plist, the updater or `phylode.conf` changes what the next build installs.
+  `phylode.conf` is the default configuration, written only when none exists yet.
 - Binding port 53 needs no entitlement, but **we do not bind it ourselves**: launchd's
   socket activation binds it and hands the socket over, so the service runs unprivileged as
   `_phylode` throughout. On Apple Silicon the linker applies an ad-hoc signature

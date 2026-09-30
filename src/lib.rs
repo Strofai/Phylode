@@ -20,6 +20,7 @@ pub mod config;
 pub mod dns;
 pub mod gatekeeper;
 pub mod health;
+pub mod install;
 pub mod journal;
 pub mod policy;
 pub mod report;

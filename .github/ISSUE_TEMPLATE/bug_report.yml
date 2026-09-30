@@ -19,7 +19,7 @@ body:
     attributes:
       label: Steps to reproduce
       placeholder: |
-        1. sudo ./deploy/install.sh
+        1. sudo phylode install
         2. dig @127.0.0.1 example.com
     validations:
       required: true

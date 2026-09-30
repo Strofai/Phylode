@@ -90,7 +90,7 @@ fn the_list_update_schedule_avoids_root_and_runs_once_at_boot() {
 fn the_default_config_reads_exactly_the_lists_the_updater_writes() {
     // All three files look right individually, but if the names disagree the service reads no
     // list, allows everything, and not one of the files reports an error.
-    let install = deploy_file("install.sh");
+    let install = deploy_file("phylode.conf");
     let updater = deploy_file("update-blocklists.sh");
     let lists_dir = "/usr/local/etc/phylode/lists";
     assert!(updater.contains(lists_dir) && install.contains(lists_dir));

@@ -137,15 +137,17 @@ more appears.
 ## Install
 
 Needs macOS and a Rust toolchain ([rustup](https://rustup.rs)). Tested on macOS 26 and 27 on
-Apple silicon; the install script is exercised end to end in CI on every change.
+Apple silicon; installing, switching on and off, and uninstalling are exercised end to end in
+CI on every change.
 
 ```bash
 cargo build --release
-sudo ./deploy/install.sh
+sudo ./target/release/phylode install   # boot service, lists, daily updates
+sudo phylode on                         # point this Mac's DNS at it
 ```
 
-To remove: `sudo ./deploy/uninstall.sh` — it restores the system resolver to automatic
-before stopping the service.
+`sudo phylode off` puts this Mac's DNS back to automatic. `sudo phylode uninstall` does that
+first, then removes the service; your configuration, lists and journal are left in place.
 
 ## License
 
