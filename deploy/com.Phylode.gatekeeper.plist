@@ -15,7 +15,10 @@
     <!-- launchd binds port 53 and hands the socket to the service, which runs unprivileged.
          The two keys under Sockets must match LAUNCHD_UDP_SOCKET / LAUNCHD_TCP_SOCKET in the
          code; renaming one means renaming both, or launchd hands over nothing and the service
-         falls back to binding the port itself (which needs privileges, and fails). -->
+         falls back to binding the port itself (which needs privileges, and fails).
+         No SockNodeName: launchd binds every interface, IPv4 and IPv6, the way Apple's own
+         ssh.plist does, so every device on the network can use this Mac. The service answers
+         only the networks it serves (serve_network in phylode.conf). -->
     <key>Sockets</key>
     <dict>
         <key>PhylodeUdp</key>
@@ -24,8 +27,6 @@
             <string>53</string>
             <key>SockType</key>
             <string>dgram</string>
-            <key>SockNodeName</key>
-            <string>127.0.0.1</string>
         </dict>
         <key>PhylodeTcp</key>
         <dict>
@@ -33,8 +34,6 @@
             <string>53</string>
             <key>SockType</key>
             <string>stream</string>
-            <key>SockNodeName</key>
-            <string>127.0.0.1</string>
         </dict>
     </dict>
 

@@ -55,6 +55,7 @@ pub const SERVICE_LOG: &str = "/var/log/phylode/stderr.log";
 const DSCL: &str = "/usr/bin/dscl";
 const LAUNCHCTL: &str = "/bin/launchctl";
 const NETWORKSETUP: &str = "/usr/sbin/networksetup";
+const SOCKETFILTERFW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
 
 #[derive(Debug, Error)]
 pub enum InstallError {
@@ -125,6 +126,9 @@ pub fn install() -> Result<(), InstallError> {
     step(&format!("Installing the program to {BINARY_PATH}"));
     install_binary()?;
 
+    step("Letting other devices reach it through the macOS firewall");
+    allow_through_firewall()?;
+
     step(&format!("Preparing the journal directory {LOG_DIR}"));
     // Group admin, so `phylode report` needs no sudo; no one else can read it, because the
     // journal is a complete browsing history.
@@ -190,10 +194,18 @@ pub fn install() -> Result<(), InstallError> {
     Ok(())
 }
 
+/// What `on` changed, and where the rest of the network can reach the service.
+pub struct SwitchedOn {
+    /// This Mac's network services, now resolving through the gatekeeper.
+    pub services: Vec<String>,
+    /// See [`network_address`].
+    pub network_address: Option<IpAddr>,
+}
+
 /// Points every network service on this Mac at the gatekeeper, after checking it answers —
 /// pointing DNS at a service that is not answering would leave the Mac unable to resolve
-/// anything. Returns the services changed.
-pub fn on() -> Result<Vec<String>, InstallError> {
+/// anything.
+pub fn on() -> Result<SwitchedOn, InstallError> {
     require_root()?;
     let config = Config::load(Path::new(CONFIG_PATH)).map_err(|error| InstallError::Config {
         detail: error.to_string(),
@@ -201,12 +213,30 @@ pub fn on() -> Result<Vec<String>, InstallError> {
     if !answers_within(&config, ANSWER_WAIT) {
         return Err(InstallError::NotAnswering);
     }
-    let mut changed = Vec::new();
+    let mut services = Vec::new();
     for service in network_services()? {
         run(NETWORKSETUP, &["-setdnsservers", &service, "127.0.0.1"])?;
-        changed.push(service);
+        services.push(service);
     }
-    Ok(changed)
+    Ok(SwitchedOn {
+        services,
+        network_address: network_address(&config),
+    })
+}
+
+/// The address other devices on the network use to reach this Mac: the one it sends from
+/// towards its first upstream. `None` when there is no route (offline).
+///
+/// Connecting a UDP socket only picks a route; nothing is sent.
+pub fn network_address(config: &Config) -> Option<IpAddr> {
+    let upstream = config.upstreams().first()?.ip();
+    let local: SocketAddr = match upstream {
+        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let socket = std::net::UdpSocket::bind(local).ok()?;
+    socket.connect((upstream, 53)).ok()?;
+    Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_unspecified())
 }
 
 /// Returns every network service that points at the gatekeeper to automatic DNS. Returns the
@@ -232,6 +262,8 @@ pub fn uninstall() -> Result<Vec<String>, InstallError> {
     let restored = off()?;
     bootout(GATEKEEPER_LABEL);
     bootout(UPDATE_LABEL);
+    // Not an error when it was never added (the firewall was set up by hand, say).
+    let _ = run(SOCKETFILTERFW, &["--remove", BINARY_PATH]);
     for path in [
         GATEKEEPER_PLIST_PATH,
         UPDATE_PLIST_PATH,
@@ -421,6 +453,20 @@ fn install_binary() -> Result<(), InstallError> {
     fs::copy(&current, &staged).map_err(|source| io_error(&staged, source))?;
     set_owner_and_mode(&staged, 0o755, 0, 0)?;
     fs::rename(&staged, target).map_err(|source| io_error(target, source))
+}
+
+/// Registers the installed binary with the macOS application firewall as allowed to accept
+/// connections, whether or not the firewall is on right now.
+///
+/// Why: with the firewall on, macOS asks on screen before an unlisted program accepts a
+/// connection from another address, and a Mac serving the network usually has nobody at the
+/// screen. The entry is removed and added again because the firewall remembers the binary's
+/// signature, which changes with every build.
+fn allow_through_firewall() -> Result<(), InstallError> {
+    let _ = run(SOCKETFILTERFW, &["--remove", BINARY_PATH]);
+    run(SOCKETFILTERFW, &["--add", BINARY_PATH])?;
+    run(SOCKETFILTERFW, &["--unblockapp", BINARY_PATH])?;
+    Ok(())
 }
 
 fn write_file(

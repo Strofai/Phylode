@@ -111,6 +111,10 @@ pub enum EventKind {
     /// One device queried too often within a window, so the rest of that window goes
     /// unanswered for it. Recorded once per window; `detail` names the device.
     RateLimited,
+    /// A device outside the networks the service answers for asked and got no response.
+    /// Recorded once per source; `detail` names it. A device on the network landing here
+    /// means `serve_network` needs its range.
+    OutsideClient,
     /// The self health check failed repeatedly and the service exited so the system would
     /// restart it. **Nothing in the house can resolve any name during this window**, which
     /// is worse than having no filtering.
@@ -120,7 +124,7 @@ pub enum EventKind {
 /// Every event kind. A new kind must be added here or the weekly summary will not
 /// recognize it. Used by [`EventKind::from_wire`], which has a test guarding against
 /// omissions.
-const ALL_EVENT_KINDS: [EventKind; 10] = [
+const ALL_EVENT_KINDS: [EventKind; 11] = [
     EventKind::Started,
     EventKind::Stopped,
     EventKind::BlocklistLoaded,
@@ -130,6 +134,7 @@ const ALL_EVENT_KINDS: [EventKind; 10] = [
     EventKind::UpstreamsRecovered,
     EventKind::RecordsDropped,
     EventKind::RateLimited,
+    EventKind::OutsideClient,
     EventKind::Unresponsive,
 ];
 
@@ -147,6 +152,7 @@ impl EventKind {
             Self::UpstreamsRecovered => "upstreams-recovered",
             Self::RecordsDropped => "records-dropped",
             Self::RateLimited => "rate-limited",
+            Self::OutsideClient => "outside-client",
             Self::Unresponsive => "unresponsive",
         }
     }
@@ -180,6 +186,10 @@ impl EventKind {
                 "one device queried too frequently; the rest of that minute went unanswered for it"
             }
             Self::Unresponsive => "the gatekeeper stopped answering and restarted itself",
+            Self::OutsideClient => {
+                "a device outside the networks this serves asked and got no answer; if it is \
+                 yours, add its range with serve_network"
+            }
         }
     }
 
@@ -204,7 +214,9 @@ impl EventKind {
             | Self::AllowlistFailed
             // Affects one device only, and it will mostly just ask another resolver;
             // household protection is not interrupted.
-            | Self::RateLimited => false,
+            | Self::RateLimited
+            // Not a device this service is for.
+            | Self::OutsideClient => false,
         }
     }
 }

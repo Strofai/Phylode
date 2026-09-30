@@ -22,7 +22,7 @@ use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
 use phylode::install;
 use phylode::journal::{self, EventKind, Journal, LocalZone};
-use phylode::policy::{Allowlist, Blocklist, RebindGuard};
+use phylode::policy::{Allowlist, Blocklist, RebindGuard, ServedNetworks};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
 
@@ -155,12 +155,14 @@ impl Command {
             Self::Diagnostics { config_path } => diagnostics(&config_path),
             Self::Report { config_path, days } => weekly_report(&config_path, days),
             Self::Install => finish(install::install()),
-            Self::On => finish(install::on().map(|services| {
+            Self::On => finish(install::on().map(|switched| {
                 println!("This Mac now uses Phylode for DNS on:");
-                for service in services {
+                for service in switched.services {
                     println!("  {service}");
                 }
                 println!("To switch back: sudo phylode off");
+                println!();
+                println!("{}", network_hint(switched.network_address));
             })),
             Self::Off => finish(install::off().map(|services| {
                 if services.is_empty() {
@@ -179,6 +181,20 @@ impl Command {
                 println!("Removed.\n\n{}", install::leftovers_message());
             })),
         }
+    }
+}
+
+/// How the rest of the network starts using this Mac.
+fn network_hint(address: Option<std::net::IpAddr>) -> String {
+    match address {
+        Some(address) => format!(
+            "Other devices on this network can use it too: set {address} as the DNS server in \
+             your router's DHCP settings, or on each device. Keep this Mac's address fixed (a \
+             DHCP reservation on the router), or devices lose it when it changes."
+        ),
+        None => "This Mac has no network connection right now, so there is no address to give \
+                 other devices yet; run phylode status once it is connected."
+            .to_string(),
     }
 }
 
@@ -217,7 +233,23 @@ fn status(config_path: &Path) -> ExitCode {
     };
 
     println!("Configuration: {}", config_path.display());
-    println!("Listening on: {:?}", config.listen());
+    let extra: Vec<String> = config
+        .served_networks()
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    println!(
+        "Answers: this Mac and devices on private network ranges{}",
+        if extra.is_empty() {
+            String::new()
+        } else {
+            format!(", plus {}", extra.join(", "))
+        }
+    );
+    match install::network_address(&config) {
+        Some(address) => println!("Other devices reach it at: {address}"),
+        None => println!("Other devices reach it at: unknown (this Mac is offline)"),
+    }
     println!(
         "Time zone for journal dates: {} (this Mac's setting)",
         local_zone().name()
@@ -588,7 +620,8 @@ async fn run(config: Config) -> Result<(), String> {
             config.block_ttl(),
             RebindGuard::with_internal_domains(config.internal_domains()),
         )
-        .serving_on(own_addresses),
+        .serving_on(own_addresses)
+        .answering(ServedNetworks::new(config.served_networks())),
     );
     dns::serve(listener, gatekeeper)
         .await

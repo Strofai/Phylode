@@ -30,6 +30,16 @@ fn the_plists_socket_names_match_the_constants_in_the_code() {
 }
 
 #[test]
+fn the_plist_listens_on_every_interface() {
+    // A SockNodeName pins launchd to one address; pinned to loopback, the service installs and
+    // answers this Mac while every other device on the network silently goes unfiltered.
+    assert!(
+        !plist().contains("<key>SockNodeName</key>"),
+        "the plist binds a single address, so other devices cannot use the service"
+    );
+}
+
+#[test]
 fn the_plist_sends_output_and_errors_somewhere() {
     // Without these two, a service that fails to start leaves no error message anywhere.
     let text = plist();

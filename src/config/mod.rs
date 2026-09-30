@@ -112,6 +112,59 @@ impl Upstream {
     }
 }
 
+/// A block of addresses written as `address/prefix length`, such as `192.0.2.0/24` or
+/// `2001:db8::/32`. Bits past the prefix are ignored, so `192.0.2.7/24` is the same network.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IpNetwork {
+    address: IpAddr,
+    prefix: u8,
+}
+
+impl IpNetwork {
+    /// `prefix` longer than the address family allows is `None`.
+    pub fn new(address: IpAddr, prefix: u8) -> Option<Self> {
+        let bits = if address.is_ipv4() { 32 } else { 128 };
+        (prefix <= bits).then_some(Self { address, prefix })
+    }
+
+    /// Whether `ip` falls inside this network. An IPv4 address never matches an IPv6 network,
+    /// or the other way round.
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        match (self.address, ip) {
+            (IpAddr::V4(net), IpAddr::V4(ip)) => {
+                let mask = u32::MAX
+                    .checked_shl(32 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u32::from(net) & mask == u32::from(ip) & mask
+            }
+            (IpAddr::V6(net), IpAddr::V6(ip)) => {
+                let mask = u128::MAX
+                    .checked_shl(128 - u32::from(self.prefix))
+                    .unwrap_or(0);
+                u128::from(net) & mask == u128::from(ip) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Display for IpNetwork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.address, self.prefix)
+    }
+}
+
+impl std::str::FromStr for IpNetwork {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let (address, prefix) = text.split_once('/').ok_or(())?;
+        let address = address.trim().parse().map_err(|_| ())?;
+        let prefix = prefix.trim().parse().map_err(|_| ())?;
+        Self::new(address, prefix).ok_or(())
+    }
+}
+
 /// The service's full configuration. The fields are private, so holding a `Config` means it
 /// passed validation.
 #[derive(Clone, Debug)]
@@ -127,6 +180,7 @@ pub struct Config {
     cache_capacity: usize,
     stale_max_age: Duration,
     internal_domains: Vec<String>,
+    served_networks: Vec<IpNetwork>,
 }
 
 impl Config {
@@ -182,6 +236,12 @@ impl Config {
         &self.internal_domains
     }
 
+    /// Networks whose devices may use the service beyond the private ranges that are always
+    /// served, from `serve_network` lines; see `policy::ServedNetworks`.
+    pub fn served_networks(&self) -> &[IpNetwork] {
+        &self.served_networks
+    }
+
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
@@ -203,6 +263,7 @@ impl Config {
         let mut cache_capacity = DEFAULT_CACHE_CAPACITY;
         let mut stale_max_age = DEFAULT_STALE_MAX_AGE;
         let mut internal_domains = Vec::new();
+        let mut served_networks = Vec::new();
 
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
@@ -250,6 +311,7 @@ impl Config {
                     }
                     internal_domains.push(value.to_string());
                 }
+                "serve_network" => served_networks.push(value.parse().map_err(|()| bad())?),
                 _ => {
                     return Err(ConfigError::UnknownKey {
                         line,
@@ -284,6 +346,7 @@ impl Config {
             cache_capacity,
             stale_max_age,
             internal_domains,
+            served_networks,
         })
     }
 }

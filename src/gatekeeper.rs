@@ -15,7 +15,7 @@ use crate::dns::{Answer, Query, RecordType, Responder, Response, Signature};
 use crate::health;
 use crate::journal::{Disposition, EventKind, Journal, Record, USER_ALLOWED};
 use crate::policy::{
-    self, Admit, Allowlist, Blocklist, RateLimit, RebindGuard, Rebinding, Verdict,
+    self, Admit, Allowlist, Blocklist, RateLimit, RebindGuard, Rebinding, ServedNetworks, Verdict,
 };
 use crate::upstream::{Conductor, Outcome};
 
@@ -46,6 +46,7 @@ pub struct Gatekeeper {
     block_ttl: Duration,
     rebind_guard: RebindGuard,
     rate_limit: RateLimit,
+    served: ServedNetworks,
     own_addresses: Vec<IpAddr>,
 }
 
@@ -57,6 +58,12 @@ impl Gatekeeper {
     /// treated as ordinary queries — journalled and sent upstream.
     pub fn serving_on(mut self, addresses: Vec<IpAddr>) -> Self {
         self.own_addresses = addresses;
+        self
+    }
+
+    /// Which devices get answers; without this, the private ranges only.
+    pub fn answering(mut self, served: ServedNetworks) -> Self {
+        self.served = served;
         self
     }
 
@@ -78,6 +85,7 @@ impl Gatekeeper {
             block_ttl,
             rebind_guard,
             rate_limit: RateLimit::new(),
+            served: ServedNetworks::new(&[]),
             own_addresses: Vec::new(),
         }
     }
@@ -275,6 +283,10 @@ fn record_type_name(record_type: RecordType) -> Cow<'static, str> {
 
 impl Responder for Gatekeeper {
     async fn respond(&self, query: &Query, client: IpAddr) -> Response {
+        // The own-probe check below comes first on purpose: a probe from this Mac's own
+        // address must be answered even when that address is outside the served networks, or
+        // the health check restarts a healthy service.
+        //
         // The gatekeeper's own probe: answered right here, without touching the lists, the
         // upstreams, or **the query journal**. It is nobody's browsing, and in the
         // statistics it would only ever be noise.
@@ -291,6 +303,15 @@ impl Responder for Gatekeeper {
             return Response::NotFound {
                 ttl: self.block_ttl,
             };
+        }
+
+        // A device outside the served networks gets no response and is not journalled — it is
+        // not one of the devices this is for. Its first query is recorded as an event.
+        if let Admit::No { first } = self.served.admit(client) {
+            if first && let Some(journal) = self.journal.as_ref() {
+                journal.event(EventKind::OutsideClient, client.to_string());
+            }
+            return Response::Ignored;
         }
 
         // A device querying too often gets no response for the rest of the window. **Not
@@ -738,6 +759,30 @@ mod tests {
             written.contains("captive.apple.com\tA\tallowed\tApple service, always allowed\n"),
             "{written}"
         );
+    }
+
+    /// Should change: a device outside the served networks gets no response, even for a
+    /// blocked domain or an Apple hard rule.
+    /// Should not change: a device on the network is answered as usual.
+    #[tokio::test]
+    async fn devices_outside_the_served_networks_get_no_response() {
+        let blocklist = Blocklist::new();
+        blocklist.load_from_str("ads.example.com");
+        let (gatekeeper, _) = parts(blocklist);
+        let outsider: IpAddr = "203.0.113.9".parse().unwrap();
+        let on_network: IpAddr = "192.168.1.20".parse().unwrap();
+        for name in ["ads.example.com", "captive.apple.com"] {
+            assert!(matches!(
+                gatekeeper.respond(&query(name), outsider).await,
+                Response::Ignored
+            ));
+        }
+        assert!(matches!(
+            gatekeeper
+                .respond(&query("ads.example.com"), on_network)
+                .await,
+            Response::Blocked { .. }
+        ));
     }
 
     #[test]
