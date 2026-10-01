@@ -319,8 +319,8 @@ fn require_only_administrators_can_change(dir: &Path, admin_gid: u32) -> Result<
         .ancestors()
         .find(|p| p.exists())
         .unwrap_or(Path::new("/"));
-    let real = fs::canonicalize(existing).map_err(|source| io_error(existing, source))?;
-    for folder in real.ancestors() {
+    for folder in folders_to_check(existing)? {
+        let folder = folder.as_path();
         let meta = fs::metadata(folder).map_err(|source| io_error(folder, source))?;
         let safe =
             match writers(meta.uid(), meta.gid(), meta.mode(), admin_gid) {
@@ -335,6 +335,21 @@ fn require_only_administrators_can_change(dir: &Path, admin_gid: u32) -> Result<
         }
     }
     Ok(())
+}
+
+/// Every folder whose writers decide what ends up at `path`: its ancestors as written and
+/// the ancestors of the folder it resolves to, each once.
+///
+/// What breaks if you change it: checking only the resolved folder misses a symbolic link
+/// along the written path — whoever can change the folder holding that link can point it
+/// somewhere protected for the check, then back at their own folder afterwards.
+fn folders_to_check(path: &Path) -> Result<std::collections::BTreeSet<PathBuf>, InstallError> {
+    let real = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
+    Ok(path
+        .ancestors()
+        .chain(real.ancestors())
+        .map(Path::to_path_buf)
+        .collect())
 }
 
 /// Who, besides root, can change a folder with this owner, group and mode.
@@ -664,6 +679,31 @@ mod tests {
         let users = "_www 70\n_phylodeish 250\nroot 0\njohn 501\n";
         let groups = "admin 80\n_something 260\nstaff 20\n";
         assert_eq!(next_system_id(users, groups), Some(261));
+    }
+
+    /// Should change: the folder holding a symbolic link on the written path is checked, not
+    /// only the folder the link resolves to.
+    /// Should not change: the resolved folder and its ancestors are still checked.
+    #[test]
+    fn the_folder_holding_a_link_on_the_path_is_checked_too() {
+        let base = std::env::temp_dir().join(format!("phylode-link-{}", std::process::id()));
+        let holder = base.join("holder");
+        let target = base.join("target");
+        fs::create_dir_all(&holder).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        let link = holder.join("bin");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let folders = folders_to_check(&link).unwrap();
+        assert!(folders.contains(&holder), "the folder holding the link");
+        let real_target = fs::canonicalize(&target).unwrap();
+        assert!(
+            folders.contains(&real_target),
+            "the folder the link resolves to"
+        );
+        assert!(folders.contains(real_target.parent().unwrap()));
+        assert!(folders.contains(Path::new("/")));
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// Should change: an access control entry granting a standard account or group change
