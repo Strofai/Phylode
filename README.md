@@ -2,190 +2,161 @@
 
 # Phylode
 
-A DNS gatekeeper for networks full of Apple devices — a home, an office, a studio, a
-school. Leave it running on a Mac that stays on (an idle Mac mini is ideal) and every device
-on the network gets ads, trackers, malicious domains and chatty appliances filtered out
-before they resolve, while Apple's own services are always let through.
+Phylode keeps ads, trackers and malicious sites away from every device on your network —
+phones, laptops, TVs, game consoles, smart speakers — from a single Mac. It works at the
+DNS level, so nothing needs to be installed on the devices themselves, and it is built
+with Apple devices in mind: Apple's own services always work, and iCloud Private Relay is
+left alone.
+
+It suits any network with a Mac that stays on: a home, an office, a studio, a school.
+
+## What it blocks
+
+Phylode blocks domains on two lists maintained by
+[HaGeZi](https://github.com/hagezi/dns-blocklists), the combination HaGeZi recommends:
+
+- **Multi PRO** — ads, trackers, analytics, telemetry from apps and appliances, and
+  common scams, phishing and malware.
+- **Threat Intelligence Feeds (Medium)** — domains known for malware, phishing, scams and
+  cryptojacking, drawn from security feeds.
+
+Together they hold about one million domains once duplicates are removed. The Mac
+downloads both every day at 04:17 and only switches to a new copy after checking that it
+is complete, keeping the previous one. The lists are not part of this repository; HaGeZi
+publishes them under GPL-3.0.
+
+A few things are never blocked, whatever any list says: `captive.apple.com`, which Apple
+devices use to detect Wi-Fi sign-in pages, and Apple's push notification and Private
+Relay services.
+
+If something you need is blocked, allow it with one command; the change takes effect
+within seconds on every device:
+
+```bash
+phylode allow example.com
+```
+
+Choosing between stricter or more relaxed lists is planned for a later version.
 
 ## Install
 
-Needs macOS and a Rust toolchain ([rustup](https://rustup.rs)). Tested on macOS 26 and 27 on
-Apple silicon; installing, switching on and off, and uninstalling are exercised end to end in
-CI on every change.
+You need a Mac that stays on, running macOS, and the Rust toolchain
+([rustup](https://rustup.rs)). Phylode is tested on macOS 26 and 27 on Apple silicon, and
+every change to the program is installed, switched on and off, and uninstalled on a fresh
+Mac in CI.
 
 ```bash
+git clone https://github.com/Strofai/Phylode.git
+cd Phylode
 cargo build --release
-sudo ./target/release/phylode install   # boot service, lists, daily updates
-sudo phylode on                         # point this Mac's DNS at it
+sudo ./target/release/phylode install
+sudo phylode on
 ```
 
-`phylode on` ends by printing this Mac's address on the network. To filter every device, set
-that address as the DNS server in your router's DHCP settings (or on each device), and give
-this Mac a fixed address there so it does not move. If the router also hands out its own IPv6
-DNS servers, devices may use those instead; see [SECURITY.md](SECURITY.md). A step-by-step
-guide for common routers is planned.
+`install` sets up the service so it starts when the Mac does, downloads the lists and waits
+until it is answering. `on` points this Mac's own DNS at it and ends by printing the Mac's
+address on the network, which you need for the next step.
 
-Devices on the private ranges networks normally use (10.x, 172.16–31.x, 192.168.x,
-100.64–127.x, 169.254.x, and IPv6 `fc00::/7` and `fe80::/10`) are answered. A network on
-public addresses adds a `serve_network` line to `/usr/local/etc/phylode.conf`, then runs
-`sudo phylode install` again to restart the service.
+Install stops without changing anything if one of the folders it writes to as root, such
+as `/usr/local/bin`, can be changed by a standard account.
 
-`sudo phylode off` puts this Mac's DNS back to automatic. `sudo phylode uninstall` does that
-first, then removes the service and its firewall entry; your configuration, lists and journal
-are left in place.
+## Set up your network
 
-Install stops without changing anything if a folder it writes into as root (`/usr/local/bin`
-and friends) can be changed by a standard, non-administrator account.
+To protect every device, they need to ask the Mac for DNS instead of your router or
+internet provider.
 
-If something goes wrong, `phylode diagnostics` prints versions, states, counts and recent
-service events with addresses and home folders removed — written to be pasted into a public
-issue. Do not post the query journal or `phylode status`; they hold your browsing history and
-configuration.
+1. In your router's settings, reserve a fixed address for the Mac, so it keeps the same
+   address after a restart.
+2. In the router's DHCP settings, set the DNS server to that address and remove any
+   other DNS servers. Devices pick up the change when they next reconnect.
+3. If your network has IPv6, check whether the router also hands out its own IPv6 DNS
+   servers. Devices may use those instead and skip filtering; turn that option off or
+   point it at the Mac too. See [SECURITY.md](SECURITY.md).
 
-## Status (2026-09-30)
+Without access to the router, you can set the DNS server on each device instead.
+Step-by-step guides for common routers are planned.
 
-**The core works and six of the security hardening items are done. There are no releases yet;
-`main` is what runs.**
+Phylode answers devices on the private address ranges that home and office networks use
+(10.x, 172.16–31.x, 192.168.x, 100.64–127.x, 169.254.x, and IPv6 `fc00::/7` and
+`fe80::/10`), and nothing else. If your network uses public addresses, add a
+`serve_network` line to `/usr/local/etc/phylode.conf` and run `sudo phylode install` again.
 
-Working today: domain blocking, encrypted upstream forwarding, answer caching, a query
-journal, an allowlist, the `allow`/`block`/`status`/`report` commands, deployment files
-that start the service at boot, plus:
+## Everyday use
 
-- **Serves the whole network** — listens on every interface and answers devices on the
-  private ranges networks use (plus any you add); anything else gets no response, so the
-  Mac never becomes an open resolver. Install registers it with the macOS firewall.
-- **Self health check** — sends itself a real query every 10 seconds; two silent rounds in
-  a row and it writes the reason to the journal and exits so the supervisor restarts it.
-- **DNS rebinding protection** — an upstream answer pointing into your local network is
-  discarded in full.
-- **Resource limits** — 1000 queries per minute per device, 300 in-flight upstream
-  queries, 10 concurrent TCP connections.
-- **Request coalescing** — the same domain is only asked upstream once at a time.
-- **DNSSEC in report-only mode** — signature failures resolve as usual and are counted in
-  the weekly summary.
-- **Automatic upstream recovery** — a failed upstream is re-probed and returns to rotation
-  when it recovers.
-- **Dependency vulnerability checks** — `cargo deny check`, rules in `deny.toml`.
-- **Daily blocklist updates** — Hagezi Pro plus Threat Intelligence Feeds, roughly 1.06
-  million domains; the new list is only swapped in after its entry count is validated, and
-  the previous version is kept.
-- **CNAME cloaking defence** — a clean-looking name whose alias points at a tracker is
+| Command | What it does |
+|---|---|
+| `phylode allow <domain>` | Allow a domain on every device, within seconds |
+| `phylode block <domain>` | Block a domain on every device, within seconds |
+| `phylode report` | This week's summary: what was blocked, which devices kept calling home, whether protection ever lapsed |
+| `phylode status` | The current configuration and the state of the lists |
+| `sudo phylode off` | Return this Mac's DNS to automatic |
+| `sudo phylode uninstall` | Turn it off and remove the service; your settings, lists and records stay |
+
+`allow` and `block` undo each other. Changing the lists needs an administrator account.
+
+### If something goes wrong
+
+`phylode diagnostics` prints the versions, states, counts and recent service events, with
+network addresses and home folder names removed, so it is safe to paste into a public
+[bug report](https://github.com/Strofai/Phylode/issues/new/choose). Don't post the query
+records or the output of `phylode status`: they contain the browsing history of everyone
+on the network, and your settings.
+
+## How it behaves
+
+- **Keeping the network online comes first.** If the lists cannot be loaded, Phylode
+  allows everything and says so in the weekly summary, rather than breaking the internet.
+- **Queries leave the network encrypted.** Phylode forwards over DNS-over-TLS or
+  DNS-over-HTTPS and never falls back to unencrypted DNS (RFC 8310 Strict Privacy, the
+  same default Apple uses). If every upstream server is unreachable, recent answers are
+  served from the cache.
+- **Your records stay on the Mac.** Queries are recorded locally for 10 days and weekly
+  summaries for 12 weeks. Nothing is sent anywhere, and there is no remote interface.
+- **Blocks are short-lived.** A blocked domain is remembered by devices for 2 seconds, so
+  allowing it works straight away.
+- **It never answers REFUSED.** That answer makes devices switch to another DNS server and
+  stop being filtered. A device sending too many queries, or one outside the networks
+  Phylode serves, gets no answer at all.
+- **It protects the network from itself.** Answers that point back into your local network
+  are discarded (DNS rebinding protection), names that only exist on your network are
+  never sent out, and a tracker hidden behind an innocent-looking alias (CNAME cloaking) is
   blocked too.
-- **Internal names never leave the network** — `.local`, the router's search domain and
-  private-address reverse lookups are answered locally.
-- **Upstream certificates verified against the macOS system trust store** — root
-  certificates update with the OS.
-- **Negative answers are cached too** — "no such domain" is remembered for up to an hour.
-- **Weekly summaries archived for 12 weeks** — the archive excludes ordinarily allowed
-  domains.
+- **It looks after itself.** It checks every 10 seconds that it is still answering and
+  restarts if not; a failed upstream server is tried again and returns when it recovers.
+- **It runs with the least privilege it can.** The service runs as its own account, not
+  root. macOS opens port 53 and hands it over.
 
-About 10,800 lines of first-party code, 9 direct dependencies (181 packages in
-`Cargo.lock`), 197 tests.
+## Status
 
-**Fuzzing**: four entry points (packets from devices on the network, packets from upstream, the
-blocklist parser, the config parser), under `fuzz/`, run by a GitHub Actions workflow. The
-latest run gave each target 10 minutes: 114 million cases in total, no crashes or hangs.
+Phylode works and runs every day, but there is no release yet: `main` is the current
+version. It is about 11,000 lines of Rust with 9 direct dependencies (181 packages in
+`Cargo.lock`) and 200 tests. Four entry points — packets from devices, packets from
+upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
+GitHub Actions workflow.
 
-**Not done yet**, in this order: packet-layer validation, macOS sandboxing.
+Planned next: Phylode's own validation of incoming packets (today the DNS library does
+it), a macOS sandbox profile, a choice of list strictness, and router guides.
 
-## What it does
-
-Every example below has been verified against a running instance.
-
-```
-$ dig @127.0.0.1 iadsdk.apple.com
-iadsdk.apple.com.  2  IN  A  0.0.0.0      ← blocked (Apple ads, on the Hagezi list), TTL 2s
-
-$ dig @127.0.0.1 apple.com
-apple.com.  165  IN  A  17.253.144.10     ← fetched over an encrypted upstream
-
-$ dig @127.0.0.1 no-such-domain.example
-;; ->>HEADER<<- status: NXDOMAIN          ← upstream says it does not exist, relayed with its SOA
-
-$ dig @127.0.0.1 192.168.0.1.nip.io
-;; ->>HEADER<<- status: NOERROR, ANSWER: 0  ← this name resolves into the local network,
-192.168.0.1.nip.io.  2  IN  SOA  ...           so the whole answer is dropped (rebinding defence)
-
-$ phylode allow doubleclick.net
-doubleclick.net allowed, effective in a few seconds. To undo: phylode block doubleclick.net
-
-$ phylode report
-Gatekeeper, week of 2026-09-14
-1. Blocked 2 queries (4 total)
-...
-6. Was there a window with no protection?
-   No — protection was continuous.
-```
-
-## Deliberate design choices
-
-- **No downgrade when upstreams fail.** If every encrypted upstream is unreachable, stale
-  cache entries carry the load — it will **never** fall back to plaintext DNS. This follows
-  RFC 8310 Strict Privacy, which is also the factory default for Apple's encrypted DNS.
-  The rule is encoded in the type system: there is no "plaintext query" variant in the code.
-
-- **It never returns REFUSED.** That would make devices retry immediately and cause a
-  storm, and would push them to the next resolver on their list — filtering would silently
-  stop working. The `Response` type has no such variant; a device over the rate limit gets
-  no answer at all instead.
-
-- **"This domain does not exist" is an answer, not a failure.** The types keep the two
-  apart (`Answer` vs `Err`), so a typo gets a correct NXDOMAIN while an upstream that
-  answered correctly is never recorded as down.
-
-- **It restarts itself when it hangs without exiting.** A boot supervisor only checks
-  whether the process is alive; it cannot detect "still running but no longer answering".
-
-- **An upstream answer pointing into the local network is discarded in full.** This is the
-  technique for turning a browser into a pivot into your LAN. One internal address in a
-  batch voids the entire batch — an attacker will mix in a public address betting that
-  only individual records get filtered. Domains that genuinely belong to your network go
-  in the config's `internal_domain`; the default is empty.
-
-- **When the blocklist fails to load, queries are allowed — and that allow is not cached.**
-  Caching it would keep the domain reachable after the list recovers.
-
-- **`captive.apple.com` and `push.apple.com` are hardcoded to always resolve.** Block the
-  first and every Apple device on the network pops up a captive-portal login window; block
-  the second and push notifications and iMessage stop working.
-
-- **The service does not run as root.** launchd binds port 53 and hands the socket over
-  (Apple's native socket activation).
-
-- **Zero file I/O on the answer path.** Journal entries go into a bounded channel and a
-  dedicated thread batches them to disk.
-
-- **Devices outside the networks it serves get no answer at all.** Not an error, not a
-  refusal: either would still hand an attacker a packet to aim at someone else.
-
-- **No control channel of any kind.** The commands edit plain text files. No network port,
-  no unix socket.
-
-## Out of scope for v1
-
-Routing all traffic through the gatekeeper, protection for devices away from the network, a
-graphical interface, telemetry of any kind.
+Out of scope for now: routing all traffic through the Mac, protection away from your
+network, a graphical interface, and telemetry of any kind.
 
 ## Built with
 
-Rust, on macOS. The protocol layer uses [hickory-dns](https://github.com/hickory-dns/hickory-dns)
-(independently audited; used by Let's Encrypt and Google Pixel) behind a thin local
-interface. Policy, cache, journal, reporting, configuration and the CLI are all
-first-party.
+Rust, on macOS. The DNS protocol layer is [hickory-dns](https://github.com/hickory-dns/hickory-dns);
+everything else — filtering, caching, records, summaries, configuration and the commands —
+is Phylode's own code. The crate forbids `unsafe` code except for the two functions that
+receive the network sockets from macOS, and a test fails the build if another appears.
 
-The whole crate is `deny(unsafe_code)`. The only exception is the pair of functions that
-adopt launchd's file descriptors; a test counts the exceptions and fails the build if one
-more appears.
+To contribute, read [CONTRIBUTING.md](CONTRIBUTING.md). Writing follows
+[docs/WRITING.md](docs/WRITING.md). To report a security issue, see [SECURITY.md](SECURITY.md).
 
 ## The name
 
-The Greek *phylax* (guardian) and *ōidē* (song): a guardian's song.
+From the Greek *phylax* (guardian) and *ōidē* (song): a guardian's song.
 
 ## License
 
-Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your
-option, following the convention of the Rust ecosystem.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in this project shall be dual licensed as above, without any additional terms
-or conditions.
+Phylode is available under either the [MIT](LICENSE-MIT) or the
+[Apache 2.0](LICENSE-APACHE) license, at your option, following the convention of the
+Rust ecosystem. Unless you explicitly state otherwise, any contribution you submit for
+inclusion is licensed the same way, without additional terms or conditions.
