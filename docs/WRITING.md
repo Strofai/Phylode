@@ -45,7 +45,9 @@ Describe it that way: a home, an office, a studio or a school, never "your famil
 | HaGeZi | hagezi, Hagezi | The list maintainer's own spelling |
 | DNS, IPv4, IPv6, DHCP | dns, Ipv6 | Protocol names are all capitals |
 
-Headings use sentence case in English: "Set up your router", not "Set Up Your Router".
+Headings use sentence case in English and start with a verb when they describe a task:
+"Set up your network", not "Network Setup". Use American spelling, as Apple does:
+license, behavior, color.
 
 ## Terms
 
@@ -63,7 +65,7 @@ should read as if it had been written first.
 | upstream (resolver) | 上游伺服器 | |
 | encrypted DNS | 加密 DNS | |
 | query | 查詢 | |
-| journal (the query log) | 查詢記錄 | 記錄 as a noun, as Apple writes it |
+| query journal | 查詢記錄 | The word the program, `phylode status` and the `journal_dir` setting use; not "query log" or "records". 記錄 as a noun, as Apple writes it |
 | weekly summary | 每週摘要 | |
 | router | 路由器 | |
 | network | 網路 | |

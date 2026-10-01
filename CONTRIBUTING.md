@@ -19,7 +19,7 @@ network online wins over blocking more, and Apple's own services always pass.
 - No details of any real network: no ISP names, device models, address ranges or keys, in
   code, comments, tests or commit messages. Use the RFC 5737 documentation ranges
   (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) or RFC 1918 ranges.
-- A new dependency needs a reason in the pull request, and its licence must be on the list in
+- A new dependency needs a reason in the pull request, and its license must be on the list in
   `deny.toml`.
 
 ## Reporting a bug
@@ -31,6 +31,6 @@ which is written to be safe to post publicly (no domains, addresses or names). D
 the query journal, `phylode status` or the raw service log into an issue.
 Security problems go through private reporting instead — see [SECURITY.md](SECURITY.md).
 
-## Licence
+## License
 
 Contributions are dual licensed under MIT and Apache-2.0, as described in the README.

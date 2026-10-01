@@ -18,7 +18,7 @@ There are no releases yet. Only the latest `main` is supported.
 
 ## In scope
 
-- A packet from a device on the network, or a response from an upstream resolver, that
+- A packet from a device on the network, or a response from an upstream server, that
   crashes the service, hangs it, or exhausts its memory.
 - Anything that makes `captive.apple.com`, `*.push.apple.com` or the other hard-coded Apple
   hosts fail to resolve.
@@ -31,13 +31,13 @@ There are no releases yet. Only the latest `main` is supported.
 ## Known limitations (not vulnerabilities)
 
 - **DNS filtering only sees DNS.** A device that connects to an IP address directly, or
-  resolves names through its own encrypted resolver, is not filtered.
+  looks up names through its own encrypted DNS server, is not filtered.
 - **iCloud Private Relay is deliberately left alone.** Apple states it protects Safari
   browsing, DNS queries and unencrypted app traffic, so a device with it enabled resolves
-  names entirely outside the gatekeeper.
+  names entirely outside Phylode.
 - **IPv6 can bypass IPv4-only setups.** If the router also advertises its own IPv6
-  resolvers, devices may use them instead.
-- **Anyone on a served network can use it.** On a shared network (a café, a hotel) that
-  includes strangers, whose queries would then be journalled. Phylode is meant for a Mac that
-  stays on one network; on a laptop that travels, prefer `sudo phylode uninstall` before
-  joining networks you do not control.
+  DNS servers, devices may use them instead and skip filtering.
+- **Anyone on a served network can use it.** On a shared network, such as a café or a
+  hotel, that includes strangers, and their queries are recorded in the query journal.
+  Phylode is meant for a Mac that stays on one network; on a laptop that travels, run
+  `sudo phylode uninstall` before joining networks you don't control.

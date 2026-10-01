@@ -107,7 +107,7 @@ You need an administrator account to change the lists.
 - `sudo phylode off` sets your Mac's DNS back to automatic. Other devices keep using
   Phylode until you change your router's settings.
 - `sudo phylode uninstall` turns Phylode off and removes it. Your settings, lists and
-  records stay on your Mac.
+  query journal stay on your Mac.
 
 ## If something goes wrong
 
@@ -115,7 +115,7 @@ Run `phylode diagnostics`. It shows versions, states, counts and recent events, 
 network addresses and home folder names removed, so you can paste it into a public
 [bug report](https://github.com/Strofai/Phylode/issues/new/choose).
 
-Don't post your query records or the output of `phylode status`. They contain the
+Don't post your query journal or the output of `phylode status`. They contain the
 browsing history of everyone on your network, and your settings.
 
 ## How Phylode protects your network
@@ -125,8 +125,8 @@ browsing history of everyone on your network, and your settings.
 - **Lookups leave your network encrypted.** Phylode uses DNS-over-TLS or DNS-over-HTTPS
   and never falls back to unencrypted DNS (RFC 8310 Strict Privacy, the same default Apple
   uses). If every upstream server is unreachable, it answers from recent results.
-- **Your records stay on your Mac.** Lookups are kept for 10 days and weekly summaries for
-  12 weeks. Nothing is sent anywhere, and there's no remote access.
+- **Your query journal stays on your Mac.** Lookups are kept for 10 days and weekly
+  summaries for 12 weeks. Nothing is sent anywhere, and there's no remote access.
 - **Allowing works right away.** Devices remember a blocked answer for only 2 seconds.
 - **Devices aren't pushed to another DNS server.** Phylode never answers REFUSED, which
   would make devices switch servers and stop being filtered. A device sending too many
@@ -158,7 +158,7 @@ network, a graphical interface, and telemetry of any kind.
 ## Built with
 
 Rust, on macOS. The DNS protocol layer is
-[hickory-dns](https://github.com/hickory-dns/hickory-dns); filtering, caching, records,
+[hickory-dns](https://github.com/hickory-dns/hickory-dns); filtering, caching, the journal,
 summaries, configuration and the commands are Phylode's own code. The crate forbids
 `unsafe` code except in the two functions that receive network sockets from macOS, and a
 test fails the build if another appears.
