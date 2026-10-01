@@ -20,8 +20,8 @@ use hickory_server::zone_handler::MessageResponse;
 use super::{Handler, send};
 use crate::dns::{Query, Responder, Response};
 
-/// Uses the packet's last byte to pick which response the responder returns, so every
-/// response shape gets fed strange names.
+/// Uses the packet's last byte to pick which response the responder returns and whether the
+/// source is admitted, so every response shape gets fed strange names.
 struct PickedResponder(u8);
 
 impl Responder for PickedResponder {
@@ -40,6 +40,10 @@ impl Responder for PickedResponder {
             3 => Response::Failure,
             _ => Response::Ignored,
         }
+    }
+
+    fn admits(&self, _client: IpAddr) -> bool {
+        self.0 & 0x08 == 0
     }
 }
 

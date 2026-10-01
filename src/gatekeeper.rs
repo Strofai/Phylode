@@ -197,6 +197,39 @@ impl Gatekeeper {
         })
     }
 
+    /// Whether `client` gets any response, counting this request against its rate limit.
+    /// `apple_service` exempts the request from the rate limit, not from the served networks.
+    ///
+    /// A device outside the served networks is not one of the devices this is for: it is not
+    /// journalled, and only its first request is recorded as an event. A device querying too
+    /// often goes unanswered for the rest of the window, with only the first excess recorded —
+    /// a flood would otherwise flood the journal too.
+    /// Apple hard rules are exempt from rate limiting: source addresses on a LAN can be forged,
+    /// and a device that cannot reach captive/push falls back to an unfiltered resolver, which
+    /// is a way around the gatekeeper entirely.
+    fn admit(&self, client: IpAddr, apple_service: bool) -> bool {
+        if let Admit::No { first } = self.served.admit(client) {
+            if first && let Some(journal) = self.journal.as_ref() {
+                journal.event(EventKind::OutsideClient, client.to_string());
+            }
+            return false;
+        }
+        if !apple_service && let Admit::No { first } = self.rate_limit.check(client, Instant::now())
+        {
+            if first && let Some(journal) = self.journal.as_ref() {
+                journal.event(
+                    EventKind::RateLimited,
+                    format!(
+                        "{client} made more than {} queries in one minute",
+                        crate::policy::ratelimit::MAX_PER_WINDOW
+                    ),
+                );
+            }
+            return false;
+        }
+        true
+    }
+
     fn log(
         &self,
         query: &Query,
@@ -305,33 +338,7 @@ impl Responder for Gatekeeper {
             };
         }
 
-        // A device outside the served networks gets no response and is not journalled — it is
-        // not one of the devices this is for. Its first query is recorded as an event.
-        if let Admit::No { first } = self.served.admit(client) {
-            if first && let Some(journal) = self.journal.as_ref() {
-                journal.event(EventKind::OutsideClient, client.to_string());
-            }
-            return Response::Ignored;
-        }
-
-        // A device querying too often gets no response for the rest of the window. **Not
-        // journalled** — a flood would flood the journal with it; only the first excess is
-        // recorded as an event.
-        // Apple hard rules are exempt from rate limiting: source addresses on a LAN can be
-        // forged, and a device that cannot reach captive/push falls back to an unfiltered
-        // resolver, which is a way around the gatekeeper entirely.
-        if !Allowlist::hard_allows(query.name().as_str())
-            && let Admit::No { first } = self.rate_limit.check(client, Instant::now())
-        {
-            if first && let Some(journal) = self.journal.as_ref() {
-                journal.event(
-                    EventKind::RateLimited,
-                    format!(
-                        "{client} made more than {} queries in one minute",
-                        crate::policy::ratelimit::MAX_PER_WINDOW
-                    ),
-                );
-            }
+        if !self.admit(client, Allowlist::hard_allows(query.name().as_str())) {
             return Response::Ignored;
         }
 
@@ -404,6 +411,10 @@ impl Responder for Gatekeeper {
         }
         self.log(query, client, disposition, "");
         response
+    }
+
+    fn admits(&self, client: IpAddr) -> bool {
+        self.admit(client, false)
     }
 }
 

@@ -329,44 +329,20 @@ impl<R: Responder> RequestHandler for Handler<R> {
 
 impl<R: Responder> Handler<R> {
     async fn decide(&self, request: &Request) -> Reply {
-        // Only standard queries are handled. Other opcodes get "not implemented", which is the
-        // protocol-correct answer and, unlike REFUSED, does not push the device to another
-        // resolver.
-        if request.metadata.op_code != OpCode::Query
-            || request.metadata.message_type != MessageType::Query
-        {
-            return Reply::Code(ResponseCode::NotImp);
-        }
-
-        let Ok(info) = request.request_info() else {
-            return Reply::Code(ResponseCode::FormErr);
+        // A reply the server writes by itself still goes through the responder's admission:
+        // sources outside the served networks, or over their rate limit, get nothing at all.
+        let (query, wire_name, wire_type) = match parse(request) {
+            Ok(parsed) => parsed,
+            Err(reply) if self.responder.admits(request.src().ip()) => return reply,
+            Err(_) => return Reply::Ignore,
         };
-        let wire_query = info.query;
-        if wire_query.query_class() != DNSClass::IN {
-            return Reply::Code(ResponseCode::NotImp);
-        }
-
-        let wire_name = WireName::from(wire_query.name().clone());
-        // ANY queries get a synthetic HINFO per RFC 8482 §4.2 and never go upstream: forwarding
-        // them verbatim returns a large response, which is ammunition for reflection
-        // amplification. Not "not implemented" either — like REFUSED, that can send the device
-        // to another resolver.
-        if wire_query.query_type() == WireRecordType::ANY {
-            return Reply::AnyHinfo { name: wire_name };
-        }
-        // Names that do not convert to a valid domain fail here rather than going upstream; see
-        // `Name::from_wire`.
-        let Some(name) = Name::from_wire(&wire_name) else {
-            return Reply::Code(ResponseCode::ServFail);
-        };
-        let query = Query::new(name, RecordType::from_wire(wire_query.query_type()));
 
         match self.responder.respond(&query, request.src().ip()).await {
             Response::Answer(records) => Reply::Answer(records),
             Response::Blocked { ttl } => Reply::Blocked {
                 name: wire_name,
                 ttl,
-                record_type: wire_query.query_type(),
+                record_type: wire_type,
             },
             Response::NotFound { ttl } => Reply::Negative {
                 name: wire_name,
@@ -387,6 +363,44 @@ impl<R: Responder> Handler<R> {
             Response::Ignored => Reply::Ignore,
         }
     }
+}
+
+/// Turns a request into a query for the responder, or into the reply the server gives by
+/// itself when the request is not one the responder handles.
+fn parse(request: &Request) -> Result<(Query, WireName, WireRecordType), Reply> {
+    // Only standard queries are handled. Other opcodes get "not implemented", which is the
+    // protocol-correct answer and, unlike REFUSED, does not push the device to another
+    // resolver.
+    if request.metadata.op_code != OpCode::Query
+        || request.metadata.message_type != MessageType::Query
+    {
+        return Err(Reply::Code(ResponseCode::NotImp));
+    }
+
+    let info = request
+        .request_info()
+        .map_err(|_| Reply::Code(ResponseCode::FormErr))?;
+    let wire_query = info.query;
+    if wire_query.query_class() != DNSClass::IN {
+        return Err(Reply::Code(ResponseCode::NotImp));
+    }
+
+    let wire_name = WireName::from(wire_query.name().clone());
+    let wire_type = wire_query.query_type();
+    // ANY queries get a synthetic HINFO per RFC 8482 §4.2 and never go upstream: forwarding
+    // them verbatim returns a large response, which is ammunition for reflection
+    // amplification. Not "not implemented" either — like REFUSED, that can send the device
+    // to another resolver.
+    if wire_type == WireRecordType::ANY {
+        return Err(Reply::AnyHinfo { name: wire_name });
+    }
+    // Names that do not convert to a valid domain fail here rather than going upstream; see
+    // `Name::from_wire`.
+    let Some(name) = Name::from_wire(&wire_name) else {
+        return Err(Reply::Code(ResponseCode::ServFail));
+    };
+    let query = Query::new(name, RecordType::from_wire(wire_type));
+    Ok((query, wire_name, wire_type))
 }
 
 enum Reply {
@@ -540,6 +554,23 @@ mod tests {
                 ttl: Duration::from_secs(2),
             }
         }
+
+        fn admits(&self, _client: IpAddr) -> bool {
+            true
+        }
+    }
+
+    /// A responder that admits nobody, standing in for a source outside the served networks.
+    struct AdmitsNobody;
+
+    impl Responder for AdmitsNobody {
+        async fn respond(&self, _query: &Query, _client: IpAddr) -> Response {
+            Response::Ignored
+        }
+
+        fn admits(&self, _client: IpAddr) -> bool {
+            false
+        }
     }
 
     /// A responder that counts how many times it was asked.
@@ -552,6 +583,10 @@ mod tests {
             Response::NotFound {
                 ttl: Duration::from_secs(2),
             }
+        }
+
+        fn admits(&self, _client: IpAddr) -> bool {
+            true
         }
     }
 
@@ -600,8 +635,14 @@ mod tests {
         name: WireName,
         record_type: WireRecordType,
     ) -> Option<Message> {
+        ask_query(conn, WireQuery::query(name, record_type)).await
+    }
+
+    /// Sends `query` over a TCP connection and returns the whole response, or `None` if there
+    /// is none.
+    async fn ask_query(conn: &mut tokio::net::TcpStream, query: WireQuery) -> Option<Message> {
         let mut message = Message::query();
-        message.add_query(WireQuery::query(name, record_type));
+        message.add_query(query);
         let bytes = message.to_vec().unwrap();
         let mut framed = (bytes.len() as u16).to_be_bytes().to_vec();
         framed.extend_from_slice(&bytes);
@@ -714,6 +755,37 @@ mod tests {
             Some(ResponseCode::NXDomain)
         );
         assert_eq!(counting.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// Should change: a source the responder does not admit gets no reply to an ANY query, a
+    /// non-Internet class or an unconvertible name — the replies the server writes by itself.
+    /// Should not change: an admitted source gets each of those replies (the control).
+    #[tokio::test]
+    async fn replies_the_server_writes_itself_go_only_to_admitted_sources() {
+        let any = WireQuery::query("example.com.".parse().unwrap(), WireRecordType::ANY);
+        let mut chaos = WireQuery::query("version.bind.".parse().unwrap(), WireRecordType::TXT);
+        chaos.set_query_class(DNSClass::CH);
+        let raw = WireQuery::query(
+            WireName::from_labels(vec!["δοκιμή".as_bytes(), b"com"]).unwrap(),
+            WireRecordType::A,
+        );
+
+        let admitted = tcp_server(10).await;
+        let mut conn = tokio::net::TcpStream::connect(admitted).await.unwrap();
+        for (query, expected) in [
+            (any.clone(), ResponseCode::NoError),
+            (chaos.clone(), ResponseCode::NotImp),
+            (raw.clone(), ResponseCode::ServFail),
+        ] {
+            let reply = ask_query(&mut conn, query).await;
+            assert_eq!(reply.map(|r| r.metadata.response_code), Some(expected));
+        }
+
+        let outside = tcp_server_with(10, Arc::new(AdmitsNobody)).await;
+        let mut conn = tokio::net::TcpStream::connect(outside).await.unwrap();
+        for query in [any, chaos, raw] {
+            assert!(ask_query(&mut conn, query).await.is_none());
+        }
     }
 
     /// Should change: new connections are closed once the pool is full.

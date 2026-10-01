@@ -321,8 +321,9 @@ pub enum Response {
     NoRecords { ttl: Duration },
     /// A server-side failure (every upstream down and nothing in the cache).
     Failure,
-    /// Return nothing at all. Used only for a device querying too often — any answer would be
-    /// continuing to serve it, and a REFUSED would send it to an unfiltered resolver.
+    /// Return nothing at all. Used for a source outside the served networks and for a device
+    /// querying too often — any answer would be continuing to serve it, and a REFUSED would
+    /// send it to an unfiltered resolver.
     Ignored,
 }
 
@@ -333,6 +334,13 @@ pub enum Response {
 /// device.
 pub trait Responder: Send + Sync + 'static {
     fn respond(&self, query: &Query, client: IpAddr) -> impl Future<Output = Response> + Send;
+
+    /// Whether `client` may receive a reply to a request the server answers by itself
+    /// (an unsupported opcode or class, an ANY query, a malformed name), counting it against
+    /// the same limits as `respond`.
+    /// What breaks if you change it: returning true unconditionally lets any source on the
+    /// internet get error replies, which makes the Mac usable for reflection attacks.
+    fn admits(&self, client: IpAddr) -> bool;
 }
 
 #[cfg(test)]
