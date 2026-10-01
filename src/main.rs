@@ -132,7 +132,10 @@ impl Command {
                 domain: (*domain).to_string(),
             }),
             ["allow" | "block"] => Err(format!("Which domain?\n\n{USAGE}")),
-            other => Err(format!("Unrecognized arguments {other:?}\n\n{USAGE}")),
+            other => Err(format!(
+                "Unknown command: phylode {}\n\n{USAGE}",
+                other.join(" ")
+            )),
         }
     }
 
