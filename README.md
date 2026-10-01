@@ -122,8 +122,9 @@ browsing history of everyone on your network, and your settings.
 
 ## How Phylode protects your network
 
-- **Your network stays online.** If the lists can't be loaded, Phylode allows everything
-  and notes it in the weekly summary, rather than cutting off the internet.
+- **Your network stays online.** If a list update can't be used, Phylode keeps blocking
+  with the previous list. If no list can be loaded at all, it allows everything and notes it
+  in the weekly summary, rather than cutting off the internet.
 - **Lookups leave your network encrypted.** Phylode uses DNS-over-TLS or DNS-over-HTTPS
   and never falls back to unencrypted DNS (RFC 8310 Strict Privacy, the same default Apple
   uses). If every upstream server is unreachable, it answers from recent results.
@@ -147,7 +148,7 @@ browsing history of everyone on your network, and your settings.
 
 Phylode works and runs every day, but there's no release yet: `main` is the current
 version. It's about 11,000 lines of Rust with 9 direct dependencies (181 packages in
-`Cargo.lock`) and 200 tests. Four entry points — packets from devices, packets from
+`Cargo.lock`) and 208 tests. Four entry points — packets from devices, packets from
 upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
 GitHub Actions workflow.
 

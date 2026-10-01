@@ -19,6 +19,7 @@
   `mDNSResponder` occupies 53, leaving this program unable to bind. Never enable it.
 - Daily blocklist updates run through `update-blocklists.sh` and
   `com.Phylode.blocklist-update.plist`: the new list is only swapped in after its entry
-  count validates, the previous one is kept, and an empty list counts as no protection.
+  count validates and the previous one is kept. In the service, a list that cannot be used
+  leaves the previous one blocking; only having no list at all counts as no protection.
 - The deployment files' contract is guarded by `tests/deploy_contract.rs`; changes to the
   plists or scripts must keep it passing.

@@ -298,7 +298,10 @@ fn status(config_path: &Path) -> ExitCode {
             "  {} domains will be blocked in total",
             blocklist.loaded_len().unwrap_or(0)
         ),
-        Err(error) => println!("  Warning: {error}; nothing is being blocked right now"),
+        Err(error) => println!(
+            "  Warning: {error}. The service keeps any list it loaded before, but would start \
+             with none if it restarted now"
+        ),
     }
     match config.user_blocklist() {
         Some(path) => println!(
@@ -789,12 +792,27 @@ async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Optio
                 );
             }
         }
-        Err(error) => {
-            eprintln!("Blocklist failed to load; allowing everything for now: {error}");
-            if let Some(journal) = journal.as_ref() {
-                journal.event(EventKind::BlocklistFailed, error.to_string());
+        // A failed load leaves any list loaded before in place, so whether the network is
+        // unprotected depends on whether there was one; the journal has to tell them apart or
+        // the weekly summary reports a gap that did not happen.
+        Err(error) => match blocklist.loaded_len() {
+            Some(previous) => {
+                eprintln!(
+                    "Blocklist update not used: {error}. Still blocking with the previous list \
+                     ({}).",
+                    plural(previous, "domain", "domains")
+                );
+                if let Some(journal) = journal.as_ref() {
+                    journal.event(EventKind::BlocklistKept, error.to_string());
+                }
             }
-        }
+            None => {
+                eprintln!("Blocklist failed to load; allowing everything for now: {error}");
+                if let Some(journal) = journal.as_ref() {
+                    journal.event(EventKind::BlocklistFailed, error.to_string());
+                }
+            }
+        },
     })
     .await;
 }

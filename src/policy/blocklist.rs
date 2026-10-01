@@ -19,13 +19,10 @@ pub enum BlocklistError {
     /// configuration lists no files). Treated as a load failure: counting 0 entries as
     /// success would make the weekly summary claim "protection was continuous" while
     /// nothing was being blocked.
-    #[error(
-        "the blocklist is empty ({0} files, 0 domains in total), which is the same as no protection"
-    )]
+    #[error("the blocklist files hold no domains ({0} files)")]
     Empty(usize),
     #[error(
-        "blocklist {path} is larger than {} MB, which no real list comes close to; it was not \
-         loaded and the previous list stays in place",
+        "blocklist {path} is larger than {} MB, which no real list comes close to",
         MAX_LIST_BYTES / (1024 * 1024)
     )]
     TooLarge { path: std::path::PathBuf },

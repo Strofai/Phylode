@@ -363,7 +363,7 @@ impl Summary {
         }
         if self.servfail_queries > 0 {
             out.push_str(&format!(
-                "   · {} queries got a failure from upstream — neither the gatekeeper nor the \
+                "   · {} queries got a failure from upstream — neither Phylode nor the \
                  upstream is broken; usually those domains' own name servers are\n",
                 self.servfail_queries
             ));
@@ -586,6 +586,47 @@ mod tests {
         assert_eq!(s.fail_open_queries, 1);
         assert_eq!(s.unprotected_events().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: an update that could not be used while the previous list kept blocking
+    /// is listed under Phylode's own health, not as a window with no protection.
+    /// Should not change: having no list at all still counts as a window with no protection
+    /// (the control, from the shared fixture).
+    #[test]
+    fn a_refused_update_with_the_previous_list_kept_is_not_a_gap() {
+        let dir = std::env::temp_dir().join(format!("phylode-report-{}-kept", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2026-09-14.tsv"),
+            QUERIES.replace("fail-open", "allowed"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("events-2026-09-14.tsv"),
+            "2026-09-14 09:59:00\tstarted\tPhylode started\n\
+             2026-09-14 10:00:04\tblocklist-kept\tblocklist list.txt is larger than 64 MB\n",
+        )
+        .unwrap();
+        let s = Summary::gather(&dir, &one_day());
+        assert!(s.unprotected_events().is_empty());
+        let text = s.render();
+        let item_three = &text[text.find("3. ").unwrap()..text.find("4. ").unwrap()];
+        assert!(
+            item_three.contains("the previous list stayed in use"),
+            "{item_three}"
+        );
+        assert!(text.contains("No — protection was continuous."), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let control = write_fixture("kept-control");
+        assert_eq!(
+            Summary::gather(&control, &one_day())
+                .unprotected_events()
+                .len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&control);
     }
 
     #[test]

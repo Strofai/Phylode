@@ -97,8 +97,12 @@ pub enum EventKind {
     Stopped,
     /// The blocklist loaded successfully.
     BlocklistLoaded,
-    /// The blocklist failed to load — **nothing is being blocked during this window**.
+    /// No blocklist could be loaded and none was loaded before — **nothing is being blocked
+    /// during this window**.
     BlocklistFailed,
+    /// A blocklist update could not be used, so the list loaded before stays in use and
+    /// blocking continues. Repeated occurrences mean the daily update keeps failing.
+    BlocklistKept,
     /// The allowlist could not be read (a missing file does not count) — domains the user
     /// allowed may be blocked again during this window.
     AllowlistFailed,
@@ -124,11 +128,12 @@ pub enum EventKind {
 /// Every event kind. A new kind must be added here or the weekly summary will not
 /// recognize it. Used by [`EventKind::from_wire`], which has a test guarding against
 /// omissions.
-const ALL_EVENT_KINDS: [EventKind; 11] = [
+const ALL_EVENT_KINDS: [EventKind; 12] = [
     EventKind::Started,
     EventKind::Stopped,
     EventKind::BlocklistLoaded,
     EventKind::BlocklistFailed,
+    EventKind::BlocklistKept,
     EventKind::AllowlistFailed,
     EventKind::UpstreamsDown,
     EventKind::UpstreamsRecovered,
@@ -147,6 +152,7 @@ impl EventKind {
             Self::Stopped => "stopped",
             Self::BlocklistLoaded => "blocklist-loaded",
             Self::BlocklistFailed => "blocklist-failed",
+            Self::BlocklistKept => "blocklist-kept",
             Self::AllowlistFailed => "allowlist-failed",
             Self::UpstreamsDown => "upstreams-down",
             Self::UpstreamsRecovered => "upstreams-recovered",
@@ -173,7 +179,10 @@ impl EventKind {
             Self::Stopped => "service stopped normally (update, shutdown or manual stop)",
             Self::BlocklistLoaded => "blocklist loaded",
             Self::BlocklistFailed => {
-                "blocklist failed to load; nothing was blocked during this window"
+                "no blocklist could be loaded; nothing was blocked during this window"
+            }
+            Self::BlocklistKept => {
+                "a blocklist update could not be used; the previous list stayed in use"
             }
             Self::AllowlistFailed => {
                 "allowlist could not be read; domains you allowed may have been blocked again \
@@ -208,6 +217,8 @@ impl EventKind {
             // "started" entry.
             | Self::Stopped
             | Self::BlocklistLoaded
+            // The previous list kept blocking; only the update was lost.
+            | Self::BlocklistKept
             | Self::UpstreamsRecovered
             | Self::RecordsDropped
             // This blocks more than usual, not less; protection is not interrupted.
