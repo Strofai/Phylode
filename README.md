@@ -68,10 +68,12 @@ instead of your router or internet provider.
    other DNS servers. Devices use the new setting the next time they connect.
 3. If your network uses IPv6, check whether the router also advertises its own IPv6 DNS
    servers. Devices that use those aren't filtered, so turn that option off or point it
-   at your Mac too. [Learn more in SECURITY.md](SECURITY.md).
+   at your Mac — which of your Mac's IPv6 addresses to use matters, and the guide below
+   explains it.
 
-If you can't change your router's settings, set the DNS server on each device instead.
-Step-by-step guides for common routers are coming.
+The [network setup guide](docs/network-setup.md) walks through each step, how to check
+that it's working, and how to set up devices one by one if you can't change your
+router's settings.
 
 Phylode answers devices on the private address ranges that home and office networks use
 (10.x, 172.16–31.x, 192.168.x, 100.64–127.x, 169.254.x, and IPv6 `fc00::/7` and
@@ -150,7 +152,7 @@ upstream servers, the blocklist parser and the configuration parser — are fuzz
 GitHub Actions workflow.
 
 Coming next: Phylode's own validation of incoming packets (today the DNS library does
-it), a macOS sandbox profile, a choice of how strict the lists are, and router guides.
+it), a macOS sandbox profile, and a choice of how strict the lists are.
 
 Not planned for now: routing all traffic through the Mac, protection away from your
 network, a graphical interface, and telemetry of any kind.
