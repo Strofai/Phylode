@@ -335,11 +335,11 @@ pub enum Response {
 pub trait Responder: Send + Sync + 'static {
     fn respond(&self, query: &Query, client: IpAddr) -> impl Future<Output = Response> + Send;
 
-    /// Whether `client` may receive a reply to a request the server answers by itself
-    /// (an unsupported opcode or class, an ANY query, a malformed name), counting it against
-    /// the same limits as `respond`.
+    /// Whether `client` is served at all, counting this against the same limits as `respond`.
+    /// Asked once per TCP connection before it takes a slot, and for each request the server
+    /// answers by itself (an unsupported opcode or class, an ANY query, a malformed name).
     /// What breaks if you change it: returning true unconditionally lets any source on the
-    /// internet get error replies, which makes the Mac usable for reflection attacks.
+    /// internet get error replies — usable for reflection — and fill every TCP slot.
     fn admits(&self, client: IpAddr) -> bool;
 }
 

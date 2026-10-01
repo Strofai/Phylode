@@ -14,11 +14,11 @@ use futures_util::StreamExt;
 use hickory_proto::op::{MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{HINFO, SOA};
 use hickory_proto::rr::{DNSClass, Name as WireName, RData, Record, RecordType as WireRecordType};
-use hickory_server::Server;
 use hickory_server::net::NetError;
 use hickory_server::net::runtime::iocompat::AsyncIoTokioAsStd;
-use hickory_server::net::runtime::{Time, TokioTime};
+use hickory_server::net::runtime::{Time, TokioRuntimeProvider, TokioTime};
 use hickory_server::net::tcp::TcpStream;
+use hickory_server::net::udp::UdpStream;
 use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{
     Request, RequestHandler, ResponseHandle, ResponseHandler, ResponseInfo, TimeoutStream,
@@ -26,6 +26,7 @@ use hickory_server::server::{
 use hickory_server::zone_handler::MessageResponseBuilder;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinSet;
 
 use super::launchd::{self, LaunchdError};
 use super::{Name, Query, RecordType, Responder, Response};
@@ -176,21 +177,69 @@ impl Listener {
 
 /// Starts serving until the process ends. Privileges should already have been dropped.
 ///
-/// UDP is handed to the library; TCP is accepted here, because the library's TCP path has no
-/// total connection cap.
+/// Both UDP and TCP are received here rather than by the library: its UDP loop answers a
+/// datagram it cannot parse before any admission check, and its TCP path has no total
+/// connection cap. Returns only when a UDP socket stops, so the supervisor restarts the service.
 pub async fn serve<R: Responder>(listener: Listener, responder: Arc<R>) -> Result<(), NetError> {
-    let tcp_handler = Arc::new(Handler {
-        responder: Arc::clone(&responder),
-    });
+    let handler = Arc::new(Handler { responder });
     let slots = TcpSlots::new(MAX_TCP_CONNECTIONS, MAX_TCP_PER_SOURCE);
     for tcp in listener.tcp {
-        tokio::spawn(serve_tcp(tcp, Arc::clone(&tcp_handler), Arc::clone(&slots)));
+        tokio::spawn(serve_tcp(tcp, Arc::clone(&handler), Arc::clone(&slots)));
     }
-    let mut server = Server::new(Handler { responder });
+    let mut udp = JoinSet::new();
     for socket in listener.udp {
-        server.register_socket(socket);
+        udp.spawn(serve_udp(socket, Arc::clone(&handler)));
     }
-    server.block_until_done().await
+    match udp.join_next().await {
+        Some(Ok(stopped)) => stopped,
+        Some(Err(_)) => Err(NetError::from("the UDP receive task stopped unexpectedly")),
+        None => std::future::pending().await,
+    }
+}
+
+/// The receive loop for one UDP socket. A datagram that parses goes to the handler, which
+/// decides whether its source gets any reply; one that does not parse is dropped unanswered,
+/// as on TCP. Returns only on an error the socket cannot recover from.
+///
+/// What breaks if you change it: handing UDP back to the library's loop makes every malformed
+/// datagram, from anywhere, get a "format error" reply — usable for reflection.
+async fn serve_udp<R: Responder>(
+    socket: UdpSocket,
+    handler: Arc<Handler<R>>,
+) -> Result<(), NetError> {
+    // Replies go to each datagram's own source; this address is never used.
+    let unused = SocketAddr::from(([127, 255, 255, 254], 0));
+    let (mut datagrams, sender) = UdpStream::<TokioRuntimeProvider>::with_bound(socket, unused);
+    while let Some(datagram) = datagrams.next().await {
+        let message = match datagram {
+            Ok(message) => message,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotConnected | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                return Err(error.into());
+            }
+            Err(_) => continue,
+        };
+        let (bytes, from) = message.into_parts();
+        // A reply to port 0 or to the unspecified address cannot be delivered.
+        if from.port() == 0 || from.ip().is_unspecified() {
+            continue;
+        }
+        let Ok(request) = Request::from_bytes(bytes, from, Protocol::Udp) else {
+            continue;
+        };
+        let reply_to = ResponseHandle::new(from, sender.with_remote_addr(from), Protocol::Udp);
+        let handler = Arc::clone(&handler);
+        tokio::spawn(async move {
+            handler
+                .handle_request::<_, TokioTime>(&request, reply_to)
+                .await;
+        });
+    }
+    Err(NetError::from("the UDP socket closed"))
 }
 
 /// The accept loop for one TCP listener. It does what the library's own loop does, plus
@@ -213,6 +262,12 @@ async fn serve_tcp<R: Responder>(
                 continue;
             }
         };
+        // A source that is not admitted is disconnected before it can hold a slot; otherwise a
+        // few outside addresses could fill the pool and lock the served devices out of TCP.
+        if !handler.responder.admits(src.ip()) {
+            drop(socket);
+            continue;
+        }
         let Some(slot) = slots.try_take(src.ip()) else {
             drop(socket);
             continue;
@@ -329,6 +384,11 @@ impl<R: Responder> RequestHandler for Handler<R> {
 
 impl<R: Responder> Handler<R> {
     async fn decide(&self, request: &Request) -> Reply {
+        // A message that is itself a response is never answered: answering one lets two servers
+        // be set against each other with a single forged packet.
+        if request.metadata.message_type == MessageType::Response {
+            return Reply::Ignore;
+        }
         // A reply the server writes by itself still goes through the responder's admission:
         // sources outside the served networks, or over their rate limit, get nothing at all.
         let (query, wire_name, wire_type) = match parse(request) {
@@ -371,9 +431,7 @@ fn parse(request: &Request) -> Result<(Query, WireName, WireRecordType), Reply> 
     // Only standard queries are handled. Other opcodes get "not implemented", which is the
     // protocol-correct answer and, unlike REFUSED, does not push the device to another
     // resolver.
-    if request.metadata.op_code != OpCode::Query
-        || request.metadata.message_type != MessageType::Query
-    {
+    if request.metadata.op_code != OpCode::Query {
         return Err(Reply::Code(ResponseCode::NotImp));
     }
 
@@ -557,6 +615,22 @@ mod tests {
 
         fn admits(&self, _client: IpAddr) -> bool {
             true
+        }
+    }
+
+    /// A responder that admits a single address, standing in for a network where every other
+    /// source is outside.
+    struct AdmitsOnly(IpAddr);
+
+    impl Responder for AdmitsOnly {
+        async fn respond(&self, _query: &Query, _client: IpAddr) -> Response {
+            Response::NotFound {
+                ttl: Duration::from_secs(2),
+            }
+        }
+
+        fn admits(&self, client: IpAddr) -> bool {
+            client == self.0
         }
     }
 
@@ -786,6 +860,108 @@ mod tests {
         for query in [any, chaos, raw] {
             assert!(ask_query(&mut conn, query).await.is_none());
         }
+    }
+
+    /// Serves UDP on a loopback port through `serve`, the path the installed service uses.
+    async fn udp_server<R: Responder>(responder: Arc<R>) -> SocketAddr {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = socket.local_addr().unwrap();
+        let listener = Listener {
+            udp: vec![socket],
+            tcp: Vec::new(),
+        };
+        tokio::spawn(serve(listener, responder));
+        addr
+    }
+
+    /// Sends one datagram and returns the reply, or `None` if none arrives within a second.
+    async fn udp_ask(server: SocketAddr, packet: &[u8]) -> Option<Vec<u8>> {
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        client.send_to(packet, server).await.unwrap();
+        let mut reply = vec![0u8; 512];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut reply))
+            .await
+            .ok()?
+            .ok()?;
+        reply.truncate(len);
+        Some(reply)
+    }
+
+    /// Should change: a datagram whose header reads but whose question does not gets no reply,
+    /// from an admitted source or not, rather than the "format error" a reply would carry.
+    /// Should not change: a well-formed query from an admitted source is answered (the control).
+    #[tokio::test]
+    async fn udp_sends_nothing_back_for_a_packet_it_cannot_parse() {
+        let mut query = Message::query();
+        query.add_query(WireQuery::query(
+            "example.com.".parse().unwrap(),
+            WireRecordType::A,
+        ));
+        let well_formed = query.to_vec().unwrap();
+        // ID, flags, one question, then a name label cut off after two of its three bytes.
+        let cut_off = [
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0x03, b'a', b'b',
+        ];
+
+        let admitted = udp_server(Arc::new(AlwaysNotFound)).await;
+        assert!(udp_ask(admitted, &well_formed).await.is_some());
+        assert_eq!(udp_ask(admitted, &cut_off).await, None);
+
+        let outside = udp_server(Arc::new(AdmitsNobody)).await;
+        assert_eq!(udp_ask(outside, &cut_off).await, None);
+    }
+
+    /// Should change: a message that is itself a response gets no reply, so a forged one cannot
+    /// set this server talking to another.
+    /// Should not change: the same message sent as a query is answered (the control).
+    #[tokio::test]
+    async fn a_message_that_is_a_response_gets_no_reply() {
+        let mut message = Message::query();
+        message.add_query(WireQuery::query(
+            "example.com.".parse().unwrap(),
+            WireRecordType::A,
+        ));
+        let server = udp_server(Arc::new(AlwaysNotFound)).await;
+        assert!(udp_ask(server, &message.to_vec().unwrap()).await.is_some());
+
+        message.metadata.message_type = MessageType::Response;
+        assert_eq!(udp_ask(server, &message.to_vec().unwrap()).await, None);
+    }
+
+    /// Should change: a connection from a source that is not admitted is closed at once and
+    /// holds no slot, so such sources cannot crowd out the devices that are served.
+    /// Should not change: an admitted source still gets answers over TCP.
+    #[tokio::test]
+    async fn sources_that_are_not_admitted_hold_no_tcp_slot() {
+        // One listener for both families: `::1` is admitted, and 127.0.0.1 (which arrives as
+        // `::ffff:127.0.0.1`) is not.
+        let listener = TcpListener::bind("[::]:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let responder = Arc::new(AdmitsOnly(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        tokio::spawn(serve_tcp(
+            listener,
+            Arc::new(Handler { responder }),
+            TcpSlots::new(2, 2),
+        ));
+
+        let mut outside = Vec::new();
+        for _ in 0..2 {
+            let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let mut byte = [0u8; 1];
+            let closed = tokio::time::timeout(Duration::from_secs(1), conn.read(&mut byte))
+                .await
+                .is_ok_and(|read| matches!(read, Ok(0) | Err(_)));
+            assert!(closed, "a source that is not admitted must be disconnected");
+            outside.push(conn);
+        }
+
+        let mut served = tokio::net::TcpStream::connect(("::1", port)).await.unwrap();
+        assert!(
+            ask(&mut served).await,
+            "the served device must still get an answer"
+        );
     }
 
     /// Should change: new connections are closed once the pool is full.
