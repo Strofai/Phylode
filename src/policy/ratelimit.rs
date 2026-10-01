@@ -40,26 +40,22 @@ pub enum Admit {
     },
 }
 
+/// How many sources a full table forgets at once when none of its windows has ended: the
+/// least recently seen eighth. Making room in batches costs one pass over the table per batch
+/// of new sources rather than one per packet.
+const FORGET_AT_ONCE: usize = MAX_TRACKED / 8;
+
 #[derive(Debug)]
 struct Window {
     started: Instant,
     seen: u32,
+    last_seen: Instant,
 }
 
 /// A fixed window counted separately per source.
 #[derive(Debug, Default)]
 pub struct RateLimit {
-    clients: Mutex<Clients>,
-}
-
-#[derive(Debug, Default)]
-struct Clients {
-    windows: HashMap<IpAddr, Window>,
-    /// No window ends before this moment, so a full table is not worth sweeping until then.
-    /// `None` means not yet known.
-    /// What breaks if you change it: sweeping for every new source while the table is full
-    /// costs a pass over every entry per packet, under the lock every query takes.
-    sweep_after: Option<Instant>,
+    clients: Mutex<HashMap<IpAddr, Window>>,
 }
 
 impl RateLimit {
@@ -79,33 +75,19 @@ impl RateLimit {
             // keeping the network online matters more than blocking more (principle 1).
             return Admit::Yes;
         };
-        let Clients {
-            windows,
-            sweep_after,
-        } = &mut *clients;
-        if !windows.contains_key(&client) && windows.len() >= MAX_TRACKED {
-            if sweep_after.is_none_or(|after| now >= after) {
-                windows.retain(|_, w| now.duration_since(w.started) < WINDOW);
-                *sweep_after = windows.values().map(|w| w.started + WINDOW).min();
-            }
-            if windows.len() >= MAX_TRACKED {
-                // Table full and this is a new source: do not track it, answer as usual.
-                // Better to under-limit one device than to wrongly block a real one. A sender
-                // forging source addresses is not bounded by per-source limits anyway: every
-                // forged address gets a window of its own.
-                return Admit::Yes;
-            }
+        if !clients.contains_key(&client) && clients.len() >= MAX_TRACKED {
+            make_room(&mut clients, now);
         }
-        let window = windows.entry(client).or_insert(Window {
+        let window = clients.entry(client).or_insert(Window {
             started: now,
             seen: 0,
+            last_seen: now,
         });
         if now.duration_since(window.started) >= WINDOW {
-            *window = Window {
-                started: now,
-                seen: 0,
-            };
+            window.started = now;
+            window.seen = 0;
         }
+        window.last_seen = now;
         window.seen = window.seen.saturating_add(1);
         if window.seen <= MAX_PER_WINDOW {
             Admit::Yes
@@ -117,9 +99,32 @@ impl RateLimit {
     }
 }
 
+/// Frees space in a full table: windows that have ended go first, and if none has, the least
+/// recently seen sources are forgotten — the way bounded tables in Apple's Private Cloud
+/// Compute make room.
+///
+/// What breaks if you change it: turning new sources away instead lets anyone who fills the
+/// table with forged addresses query without limit from their own; forgetting the busiest
+/// sources instead lets a flooding device keep resetting its own count. A forgotten source
+/// only starts counting again, so this never blocks a device wrongly.
+fn make_room(clients: &mut HashMap<IpAddr, Window>, now: Instant) {
+    clients.retain(|_, window| now.duration_since(window.started) < WINDOW);
+    if clients.len() < MAX_TRACKED {
+        return;
+    }
+    let mut last_seen: Vec<Instant> = clients.values().map(|window| window.last_seen).collect();
+    let cutoff = *last_seen.select_nth_unstable(FORGET_AT_ONCE - 1).1;
+    clients.retain(|_, window| window.last_seen > cutoff);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A distinct private address for each `n`, standing in for forged sources.
+    fn forged(n: u32) -> IpAddr {
+        IpAddr::from((0x0a00_0000 + n).to_be_bytes())
+    }
 
     fn device(n: u8) -> IpAddr {
         IpAddr::from([192, 168, 1, n])
@@ -168,40 +173,71 @@ mod tests {
         }
     }
 
-    /// Should change: the number of tracked sources is capped rather than growing without
-    /// bound. Should not change: a new source arriving with a full table is still answered.
+    /// Should change: a source that first appears once the table is full is still counted, so
+    /// filling the table with forged addresses does not free another address from its limit.
+    /// Should not change: its queries up to the limit are answered.
     #[test]
-    fn the_number_of_tracked_sources_is_capped() {
-        let limit = RateLimit::new();
-        let now = Instant::now();
-        for n in 0..MAX_TRACKED as u32 {
-            limit.check(IpAddr::from((0x0a00_0000 + n).to_be_bytes()), now);
-        }
-        assert_eq!(limit.check(device(250), now), Admit::Yes);
-        assert_eq!(limit.clients.lock().unwrap().windows.len(), MAX_TRACKED);
-
-        // Once the window passes, stale entries are cleared and new sources are tracked again.
-        limit.check(device(251), now + WINDOW);
-        assert!(limit.clients.lock().unwrap().windows.len() < MAX_TRACKED);
-    }
-
-    /// Should change: with a full table of windows that have not ended, the next sweep waits
-    /// until the oldest one ends instead of running for every new source.
-    /// Should not change: new sources are still answered meanwhile.
-    #[test]
-    fn a_full_table_is_not_swept_again_before_a_window_can_end() {
+    fn a_source_arriving_at_a_full_table_is_still_limited() {
         let limit = RateLimit::new();
         let start = Instant::now();
         for n in 0..MAX_TRACKED as u32 {
-            limit.check(IpAddr::from((0x0a00_0000 + n).to_be_bytes()), start);
+            limit.check(forged(n), start);
         }
-        let later = start + Duration::from_secs(30);
-        assert_eq!(limit.check(device(250), later), Admit::Yes);
+        let later = start + Duration::from_secs(1);
+        for _ in 0..MAX_PER_WINDOW {
+            assert_eq!(limit.check(device(250), later), Admit::Yes);
+        }
+        assert_eq!(limit.check(device(250), later), Admit::No { first: true });
+    }
+
+    /// Should change: while new forged sources keep arriving, a device that keeps querying
+    /// stays counted and reaches its limit.
+    /// Should not change: the table never grows past its cap.
+    #[test]
+    fn a_busy_device_stays_counted_through_a_flood_of_new_sources() {
+        let limit = RateLimit::new();
+        let start = Instant::now();
+        for n in 0..MAX_TRACKED as u32 {
+            limit.check(forged(n), start);
+        }
+        for i in 0..MAX_PER_WINDOW {
+            let now = start + Duration::from_millis(u64::from(i) + 1);
+            assert_eq!(limit.check(device(250), now), Admit::Yes);
+            for k in 0..8 {
+                limit.check(forged(MAX_TRACKED as u32 + i * 8 + k), now);
+            }
+            assert!(limit.clients.lock().unwrap().len() <= MAX_TRACKED);
+        }
+        let end = start + Duration::from_millis(u64::from(MAX_PER_WINDOW) + 1);
+        assert_eq!(limit.check(device(250), end), Admit::No { first: true });
+    }
+
+    /// Should change: making room forgets a whole batch at once, so the next new sources are
+    /// added without another pass over the table.
+    /// Should not change: windows that have ended are cleared first.
+    #[test]
+    fn a_full_table_makes_room_in_batches_and_drops_ended_windows_first() {
+        let limit = RateLimit::new();
+        let start = Instant::now();
+        for n in 0..MAX_TRACKED as u32 {
+            limit.check(forged(n), start + Duration::from_nanos(u64::from(n)));
+        }
+        let later = start + Duration::from_secs(1);
+        limit.check(device(250), later);
         assert_eq!(
-            limit.clients.lock().unwrap().sweep_after,
-            Some(start + WINDOW),
-            "the oldest window began at the start, so none can end before a minute after it"
+            limit.clients.lock().unwrap().len(),
+            MAX_TRACKED - FORGET_AT_ONCE + 1
         );
-        assert_eq!(limit.check(device(251), later), Admit::Yes);
+
+        let ended = RateLimit::new();
+        for n in 0..MAX_TRACKED as u32 {
+            ended.check(forged(n), start);
+        }
+        ended.check(device(251), start + WINDOW);
+        assert_eq!(
+            ended.clients.lock().unwrap().len(),
+            1,
+            "every window from the first minute has ended, so all of them make way"
+        );
     }
 }
