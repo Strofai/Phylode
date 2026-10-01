@@ -31,6 +31,11 @@ MIRRORS=(
 )
 # Fewer entries than this means a corrupt download. Both lists normally exceed 200,000.
 MIN_ENTRIES=10000
+# More than this, or a file larger than MAX_BYTES, means a damaged or hostile download: the two
+# lists hold about a million entries and under 20 MB each. MAX_BYTES must equal
+# MAX_LIST_BYTES in src/policy/blocklist.rs (a test compares them).
+MAX_ENTRIES=5000000
+MAX_BYTES=67108864
 
 mkdir -p "$DIR"
 status=0
@@ -42,7 +47,7 @@ for entry in "${LISTS[@]}"; do
 
   fetched=0
   for mirror in "${MIRRORS[@]}"; do
-    if curl -fsSL --proto '=https' --tlsv1.2 --max-time 300 -o "$tmp" "$mirror/$file"; then
+    if curl -fsSL --proto '=https' --tlsv1.2 --max-time 300 --max-filesize "$MAX_BYTES" -o "$tmp" "$mirror/$file"; then
       fetched=1
       break
     fi
@@ -60,7 +65,7 @@ for entry in "${LISTS[@]}"; do
   # error page and an empty file all fail this check.
   declared="$(grep -m1 '^# Number of entries:' "$tmp" | awk '{print $NF}' || true)"
   actual="$(grep -vc '^#' "$tmp" || true)"
-  if [[ -z "$declared" || "$declared" != "$actual" || "$actual" -lt $MIN_ENTRIES ]]; then
+  if [[ -z "$declared" || "$declared" != "$actual" || "$actual" -lt $MIN_ENTRIES || "$actual" -gt $MAX_ENTRIES ]]; then
     echo "$(date '+%F %T') ${name}: validation failed (header says ${declared:-none}, actual $actual), keeping the previous list" >&2
     rm -f "$tmp"
     status=1

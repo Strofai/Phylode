@@ -1,6 +1,7 @@
 //! Blocklist: loads a set of domains from files for queries to match against.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
@@ -22,6 +23,38 @@ pub enum BlocklistError {
         "the blocklist is empty ({0} files, 0 domains in total), which is the same as no protection"
     )]
     Empty(usize),
+    #[error(
+        "blocklist {path} is larger than {} MB, which no real list comes close to; it was not \
+         loaded and the previous list stays in place",
+        MAX_LIST_BYTES / (1024 * 1024)
+    )]
+    TooLarge { path: std::path::PathBuf },
+}
+
+/// The most one list file may hold. The lists in use are under 20 MB each; this keeps
+/// a damaged or hostile download from exhausting memory.
+/// What breaks if you change it: it must equal `MAX_BYTES` in `deploy/update-blocklists.sh`
+/// (a test compares them), or the updater accepts a file the service then refuses.
+const MAX_LIST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Reads one list file, refusing anything over [`MAX_LIST_BYTES`] without reading the rest.
+fn read_list(path: &Path) -> Result<String, BlocklistError> {
+    let read_error = |source| BlocklistError::Read {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .map_err(read_error)?
+        .take(MAX_LIST_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(read_error)?;
+    if text.len() as u64 > MAX_LIST_BYTES {
+        return Err(BlocklistError::TooLarge {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(text)
 }
 
 /// The result of a list lookup.
@@ -113,29 +146,19 @@ impl Blocklist {
         let mut domains = HashSet::new();
 
         for path in required {
-            let path = path.as_ref();
-            let text = std::fs::read_to_string(path).map_err(|source| BlocklistError::Read {
-                path: path.to_path_buf(),
-                source,
-            })?;
-            parse_into(&text, &mut domains);
+            parse_into(&read_list(path.as_ref())?, &mut domains);
         }
         if domains.is_empty() {
             return Err(BlocklistError::Empty(required.len()));
         }
 
         for path in optional {
-            let path = path.as_ref();
-            match std::fs::read_to_string(path) {
+            match read_list(path.as_ref()) {
                 Ok(text) => parse_into(&text, &mut domains),
                 // Not created yet simply means nothing has been blocked by hand; not an error.
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(BlocklistError::Read {
-                        path: path.to_path_buf(),
-                        source,
-                    });
-                }
+                Err(BlocklistError::Read { source, .. })
+                    if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
             }
         }
 
@@ -284,6 +307,55 @@ mod tests {
             "an empty update must not replace the list that was already loaded"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: a list file over the size limit is refused without being read whole.
+    /// Should not change: the list already loaded keeps blocking, and a file at the limit
+    /// is not refused for its size.
+    #[test]
+    fn an_oversized_list_is_refused_and_the_existing_one_stays() {
+        let dir = std::env::temp_dir().join(format!("phylode-bl-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let full = dir.join("full.txt");
+        let at_limit = dir.join("at-limit.txt");
+        let oversized = dir.join("oversized.txt");
+        std::fs::write(&full, "ads.example.com\n").unwrap();
+        // Sparse files of zero bytes: no disk space used, and no domains in them.
+        std::fs::File::create(&at_limit)
+            .unwrap()
+            .set_len(MAX_LIST_BYTES)
+            .unwrap();
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_LIST_BYTES + 1)
+            .unwrap();
+        let none: &[&Path] = &[];
+
+        let list = Blocklist::new();
+        assert_eq!(list.load_all(&[&full], none).unwrap(), 1);
+        assert!(matches!(
+            list.load_all(&[&full], &[&oversized]),
+            Err(BlocklistError::TooLarge { .. })
+        ));
+        assert!(matches!(
+            list.load_all(&[&oversized], none),
+            Err(BlocklistError::TooLarge { .. })
+        ));
+        assert_eq!(list.lookup("ads.example.com"), Verdict::Blocked);
+        assert_eq!(list.load_all(&[&full], &[&at_limit]).unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should not change: the updater and the service agree on the largest list file, or the
+    /// updater installs files the service then refuses to load.
+    #[test]
+    fn the_updater_uses_the_same_size_limit() {
+        let script = include_str!("../../deploy/update-blocklists.sh");
+        let limit = script
+            .lines()
+            .find_map(|line| line.strip_prefix("MAX_BYTES="))
+            .expect("the updater sets MAX_BYTES");
+        assert_eq!(limit.parse::<u64>().unwrap(), MAX_LIST_BYTES);
     }
 
     #[test]
