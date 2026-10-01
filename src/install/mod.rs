@@ -92,7 +92,8 @@ pub enum InstallError {
     #[error(
         "{path} can be changed by an account that is not an administrator, which could then \
          replace what install puts there and have it run as root or as the service. Nothing \
-         was installed. Make the folder writable only by root or an administrator, then try again"
+         was installed. Make the folder writable only by root or an administrator (`ls -lde \
+         {path}` shows its owner, mode and any access control entries), then try again"
     )]
     UnprotectedDirectory { path: PathBuf },
 }
@@ -321,11 +322,12 @@ fn require_only_administrators_can_change(dir: &Path, admin_gid: u32) -> Result<
     let real = fs::canonicalize(existing).map_err(|source| io_error(existing, source))?;
     for folder in real.ancestors() {
         let meta = fs::metadata(folder).map_err(|source| io_error(folder, source))?;
-        let safe = match writers(meta.uid(), meta.gid(), meta.mode(), admin_gid) {
-            Writers::RootOrAdministrators => true,
-            Writers::Owner(uid) => is_administrator(uid)?,
-            Writers::Anyone => false,
-        };
+        let safe =
+            match writers(meta.uid(), meta.gid(), meta.mode(), admin_gid) {
+                Writers::RootOrAdministrators => true,
+                Writers::Owner(uid) => is_administrator(uid)?,
+                Writers::Anyone => false,
+            } && !acl_lets_others_write(&run("/bin/ls", &["-lde", &folder.to_string_lossy()])?);
         if !safe {
             return Err(InstallError::UnprotectedDirectory {
                 path: folder.to_path_buf(),
@@ -355,6 +357,47 @@ fn writers(uid: u32, gid: u32, mode: u32, admin_gid: u32) -> Writers {
     } else {
         Writers::Owner(uid)
     }
+}
+
+/// Accounts an access control entry may grant change rights to without making a folder unsafe.
+const ACL_TRUSTED: [&str; 3] = ["user:root", "group:wheel", "group:admin"];
+
+/// Access control rights that change a folder or what is in it, as `ls -le` names them.
+const ACL_WRITE_RIGHTS: [&str; 10] = [
+    "write",
+    "append",
+    "add_file",
+    "add_subdirectory",
+    "delete",
+    "delete_child",
+    "writeattr",
+    "writeextattr",
+    "writesecurity",
+    "chown",
+];
+
+/// Whether an `ls -lde` listing shows an access control entry that lets an account other than
+/// root or an administrator change the folder, or the folders install later creates inside it
+/// (entries meant only for those are counted too).
+/// What breaks if you change it: the owner, group and mode checks alone miss a macOS access
+/// control entry granting a standard account the same rights.
+fn acl_lets_others_write(listing: &str) -> bool {
+    listing.lines().skip(1).any(|entry| {
+        let Some((head, rights)) = entry.trim().rsplit_once(' ') else {
+            return false;
+        };
+        let Some(principal) = head.strip_suffix(" allow") else {
+            return false;
+        };
+        let principal = principal.strip_suffix(" inherited").unwrap_or(principal);
+        let principal = principal
+            .split_once(": ")
+            .map_or(principal, |(_, name)| name);
+        !ACL_TRUSTED.contains(&principal)
+            && rights
+                .split(',')
+                .any(|right| ACL_WRITE_RIGHTS.contains(&right))
+    })
 }
 
 fn is_administrator(uid: u32) -> Result<bool, InstallError> {
@@ -621,6 +664,39 @@ mod tests {
         let users = "_www 70\n_phylodeish 250\nroot 0\njohn 501\n";
         let groups = "admin 80\n_something 260\nstaff 20\n";
         assert_eq!(next_system_id(users, groups), Some(261));
+    }
+
+    /// Should change: an access control entry granting a standard account or group change
+    /// rights is caught, including one inherited or meant only for folders created inside.
+    /// Should not change: no entries, deny entries, read-only grants, and grants to root or
+    /// the admin group pass. Listings follow the format `ls -lde` prints on macOS.
+    #[test]
+    fn access_control_entries_that_let_others_write_are_caught() {
+        let header = "drwxr-xr-x  3 root  wheel  96 Aug  8 15:25 /usr/local/bin\n";
+        let with = |entries: &str| format!("{header}{entries}");
+
+        for unsafe_entries in [
+            " 0: group:staff allow add_file,add_subdirectory,delete_child\n",
+            " 0: group:everyone deny delete\n 1: user:alex allow write\n",
+            " 0: group:staff inherited allow add_file\n",
+            " 0: group:everyone allow add_file,directory_inherit,only_inherit\n",
+        ] {
+            assert!(
+                acl_lets_others_write(&with(unsafe_entries)),
+                "{unsafe_entries}"
+            );
+        }
+        for safe_entries in [
+            "",
+            " 0: group:everyone deny delete\n",
+            " 0: group:staff allow list,search,readattr,readextattr,readsecurity\n",
+            " 0: group:admin allow add_file,add_subdirectory,delete_child\n",
+        ] {
+            assert!(
+                !acl_lets_others_write(&with(safe_entries)),
+                "{safe_entries}"
+            );
+        }
     }
 
     /// Should change: a folder any account, or an unrelated group, can write is refused, and

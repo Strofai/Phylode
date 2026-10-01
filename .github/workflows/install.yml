@@ -34,6 +34,19 @@ jobs:
       # With the firewall on, install must still succeed and register the binary on the firewall's
       # allowed list. Whether that entry is what lets other devices through cannot be shown here:
       # on this runner, queries on the network address are answered even with the entry blocked.
+      - name: Install refuses a folder an access control entry opens to standard accounts
+        run: |
+          entry="group:staff allow add_file,delete_child"
+          sudo chmod +a "$entry" /usr/local/bin
+          if out=$(sudo ./target/release/phylode install 2>&1); then
+            echo "$out"; echo "::error::install accepted /usr/local/bin with \"$entry\""; exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q "can be changed by an account that is not an administrator" \
+            || { echo "::error::install failed, but not because of the folder"; exit 1; }
+          if test -e /usr/local/bin/phylode; then echo "::error::install wrote before refusing"; exit 1; fi
+          sudo chmod -a "$entry" /usr/local/bin
+
       - name: Turn the macOS firewall on, as many Macs have it
         run: sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate on
 
