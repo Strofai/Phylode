@@ -48,7 +48,7 @@ pub enum ConfigError {
     )]
     BlockTtlTooLong { got: Duration, max: Duration },
     #[error(
-        "no upstream resolver is set; add a line such as `upstream = tls 1.1.1.1 cloudflare-dns.com`"
+        "no upstream server is set; add a line such as `upstream = tls 1.1.1.1 cloudflare-dns.com`"
     )]
     NoUpstream,
     #[error("no listen address is set; add a line such as `listen = 0.0.0.0:53`")]

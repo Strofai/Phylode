@@ -116,7 +116,7 @@ fn render_config(out: &mut String, config: &Config) {
     );
     let _ = writeln!(
         out,
-        "Internal domains exempt from rebinding defence: {}",
+        "Internal domains exempt from rebinding defense: {}",
         config.internal_domains().len()
     );
 }
@@ -385,7 +385,7 @@ mod tests {
             "macOS 26.1 (aarch64)",
             "Service answering: yes",
             "Upstreams: 1 (DNS over TLS)",
-            "Internal domains exempt from rebinding defence: 1",
+            "Internal domains exempt from rebinding defense: 1",
             "Blocklist: 1060000 domains loaded",
             "list 2: missing",
             "Own blocklist entries: could not be read",

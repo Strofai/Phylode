@@ -163,7 +163,7 @@ pub fn install() -> Result<(), InstallError> {
         println!("    lists downloaded");
     } else {
         println!(
-            "    ⚠️ the lists are still downloading; the service starts now and begins blocking \
+            "    Warning: the lists are still downloading; the service starts now and begins blocking \
              as soon as they arrive"
         );
     }
@@ -188,7 +188,7 @@ pub fn install() -> Result<(), InstallError> {
         println!("    answering and blocking");
     } else {
         println!(
-            "    ⚠️ answering, but the lists are not loaded yet; it allows everything until they \
+            "    Warning: Phylode is answering, but the lists are not loaded yet; it allows everything until they \
              are — check with: phylode status"
         );
     }

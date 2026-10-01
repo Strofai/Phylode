@@ -295,7 +295,7 @@ fn status(config_path: &Path) -> ExitCode {
             "  {} domains will be blocked in total",
             blocklist.loaded_len().unwrap_or(0)
         ),
-        Err(error) => println!("  ⚠️ {error} — nothing is being blocked right now"),
+        Err(error) => println!("  Warning: {error}; nothing is being blocked right now"),
     }
     match config.user_blocklist() {
         Some(path) => println!(
@@ -314,7 +314,7 @@ fn status(config_path: &Path) -> ExitCode {
                     path.display(),
                     plural(allowlist.user_len(), "entry", "entries")
                 ),
-                Err(error) => println!("Your own allowlist: ⚠️ {error}"),
+                Err(error) => println!("Your own allowlist: not loaded ({error})"),
             }
         }
         None => println!("Your own allowlist: no allowlist set in the configuration"),
@@ -324,9 +324,9 @@ fn status(config_path: &Path) -> ExitCode {
         Allowlist::hard_rules().join(", ")
     );
     match config.internal_domains() {
-        [] => println!("Rebinding defence: on, with no exempt domains"),
+        [] => println!("Rebinding defense: on, with no exempt domains"),
         domains => println!(
-            "Rebinding defence: on; these domains are exempt (may point inward): {}",
+            "Rebinding defense: on; these domains are exempt (may point inward): {}",
             domains.join(", ")
         ),
     }
@@ -388,7 +388,7 @@ fn age_mark(path: &Path) -> String {
         Some(1) => " (updated 1 day ago)".to_string(),
         Some(days @ 2..=3) => format!(" (updated {days} days ago)"),
         Some(days) => {
-            format!(" (⚠️ not updated for {days} days; the daily schedule may be broken)")
+            format!(" (warning: not updated for {days} days; the daily schedule may be broken)")
         }
     }
 }

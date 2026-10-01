@@ -269,7 +269,7 @@ impl Summary {
             (Some(only), _) => only.clone(),
             _ => "(no dates given)".to_string(),
         };
-        out.push_str(&format!("Gatekeeper, week of {range}\n\n"));
+        out.push_str(&format!("Phylode, week of {range}\n\n"));
 
         if self.total_queries == 0 {
             out.push_str("No queries were recorded in this period.\n");
@@ -296,7 +296,7 @@ impl Summary {
         // your house". It gets its own sentence.
         if self.rebind_blocked > 0 {
             out.push_str(&format!(
-                "   ⚠️ Also dropped {} answers pointing at devices inside your network — \
+                "   Warning: also dropped {} answers pointing at devices inside your network — \
                  that is how a domain name gets used to attack devices on your network\n",
                 self.rebind_blocked
             ));
@@ -346,7 +346,7 @@ impl Summary {
             }
         }
 
-        out.push_str("\n3. The gatekeeper's own health\n");
+        out.push_str("\n3. Phylode's own health\n");
         let restarts = self.restart_count();
         if restarts > 1 {
             out.push_str(&format!(
@@ -433,7 +433,7 @@ impl Summary {
         let no_records = self.events.is_empty() && self.total_queries == 0;
         if no_records {
             out.push_str(
-                "   ⚠️ Cannot tell — there is not a single record for this period (the service \
+                "   Warning: cannot tell — there is not a single record for this period (the service \
                  was not running, or the journal directory is not writable).\n",
             );
         } else if unprotected.is_empty() && self.fail_open_queries == 0 {
@@ -441,28 +441,31 @@ impl Summary {
         } else {
             if self.fail_open_queries > 0 {
                 out.push_str(&format!(
-                    "   ⚠️ {} queries were allowed through while the blocklist was unavailable — \
+                    "   Warning: {} queries were allowed through while the blocklist was unavailable — \
                      nothing was being blocked during that window\n",
                     self.fail_open_queries
                 ));
             }
             for (time, kind, detail) in unprotected {
-                out.push_str(&format!("   ⚠️ {time} {} — {detail}\n", event_label(kind)));
+                out.push_str(&format!(
+                    "   Warning: {time} {} — {detail}\n",
+                    event_label(kind)
+                ));
             }
         }
 
         out.push_str("\n7. Were any records dropped?\n");
         let dropped = self.dropped_events();
         if no_records {
-            out.push_str("   ⚠️ Cannot tell — there are no journal files for this period.\n");
+            out.push_str("   Warning: cannot tell — there are no journal files for this period.\n");
         } else if dropped.is_empty() && self.unreadable_files.is_empty() {
             out.push_str("   No — the journal for this period is complete.\n");
         } else {
             for (time, _, detail) in dropped {
-                out.push_str(&format!("   ⚠️ {time} records dropped: {detail}\n"));
+                out.push_str(&format!("   Warning: {time} records dropped: {detail}\n"));
             }
             for file in &self.unreadable_files {
-                out.push_str(&format!("   ⚠️ Could not read journal file {file}\n"));
+                out.push_str(&format!("   Warning: could not read journal file {file}\n"));
             }
         }
 
@@ -680,7 +683,7 @@ mod tests {
         // complete" would be a silent failure.
         assert!(!text.contains("protection was continuous"));
         assert!(!text.contains("journal for this period is complete"));
-        assert!(text.contains("Cannot tell"));
+        assert!(text.contains("Warning: cannot tell"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -692,7 +695,7 @@ mod tests {
             assert!(text.contains(marker), "item {marker} is missing");
         }
         assert!(
-            text.contains("⚠️"),
+            text.contains("Warning:"),
             "an unprotected window must carry a warning marker"
         );
         let _ = std::fs::remove_dir_all(&dir);

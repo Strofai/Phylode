@@ -179,13 +179,13 @@ impl EventKind {
                 "allowlist could not be read; domains you allowed may have been blocked again \
                  during this window (Apple's hard rules still applied)"
             }
-            Self::UpstreamsDown => "every upstream resolver was unreachable; only the cache held",
-            Self::UpstreamsRecovered => "upstream resolvers recovered",
+            Self::UpstreamsDown => "every upstream server was unreachable; only the cache held",
+            Self::UpstreamsRecovered => "upstream servers recovered",
             Self::RecordsDropped => "records were dropped",
             Self::RateLimited => {
                 "one device queried too frequently; the rest of that minute went unanswered for it"
             }
-            Self::Unresponsive => "the gatekeeper stopped answering and restarted itself",
+            Self::Unresponsive => "Phylode stopped answering and restarted itself",
             Self::OutsideClient => {
                 "a device outside the networks this serves asked and got no answer; if it is \
                  yours, add its range with serve_network"
