@@ -1,8 +1,10 @@
 # Phylode — project rules
 
-A DNS gatekeeper for networks full of Apple devices (a home, an office, a studio, a school):
-blocks ads, trackers, malicious domains and chatty appliances for every device on the
-network. Rust, running on a Mac that stays on.
+A DNS gatekeeper that runs on a Mac that stays on and blocks ads, trackers, malicious
+domains and chatty appliances for every device on the network (a home, an office, a
+studio, a school), with particular care for Apple devices. Written in Rust.
+
+Documentation, command output and error messages follow `docs/WRITING.md`.
 
 This file is the contract for anyone — human or AI — working on this repository. Read it
 before writing code.
