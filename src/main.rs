@@ -44,7 +44,7 @@ Usage:
   phylode report [days]          weekly summary (7 days by default)
   phylode diagnostics            a report to paste into a bug report; holds no domains,
                                  addresses or names
-  phylode [--config <file>]      run the gatekeeper in the foreground
+  phylode [--config <file>]      run Phylode in the foreground
 
 allow and block each undo the other, taking effect within seconds.";
 
