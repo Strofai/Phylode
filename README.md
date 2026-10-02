@@ -148,7 +148,7 @@ browsing history of everyone on your network, and your settings.
 
 Phylode works and runs every day, but there's no release yet: `main` is the current
 version. It's about 11,000 lines of Rust with 9 direct dependencies (181 packages in
-`Cargo.lock`) and 208 tests. Four entry points — packets from devices, packets from
+`Cargo.lock`) and 213 tests. Four entry points — packets from devices, packets from
 upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
 GitHub Actions workflow.
 

@@ -724,6 +724,37 @@ mod tests {
         );
     }
 
+    /// Should change: an alias pointing at a listed internationalized domain is blocked, as a
+    /// direct query for that domain is.
+    #[tokio::test]
+    async fn an_alias_to_a_listed_internationalized_domain_is_blocked() {
+        let blocklist = Blocklist::new();
+        blocklist.load_from_str("xn--bcher-kva.example\n");
+        let (gatekeeper, cache) = parts(blocklist);
+        let device: IpAddr = "192.168.0.20".parse().unwrap();
+        let cloaked = query("metrics.example.com");
+        cache.insert(
+            cloaked.clone(),
+            Cached::Records(crate::dns::Records::with_cname(
+                cloaked.name(),
+                Duration::from_secs(300),
+                "xn--bcher-kva.example",
+                "93.184.216.34".parse().unwrap(),
+            )),
+        );
+
+        assert!(matches!(
+            gatekeeper
+                .respond(&query("xn--bcher-kva.example"), device)
+                .await,
+            Response::Blocked { .. }
+        ));
+        assert!(matches!(
+            gatekeeper.respond(&cloaked, device).await,
+            Response::Blocked { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn apple_hard_rules_still_apply_while_the_blocklist_is_unavailable() {
         // They must pass even in the state where no list has loaded at all.

@@ -202,20 +202,19 @@ impl Records {
             .collect()
     }
 
-    /// The names this set's CNAMEs point to (lowercase, no trailing dot).
+    /// The names this set's CNAMEs point to, normalized exactly as query names are
+    /// ([`Name::from_wire`]: `xn--` punycode, lowercase, no trailing dot).
     /// The gatekeeper matches these against the blocklist to catch CNAME cloaking: a
     /// first-party-looking subdomain that actually resolves to a tracker.
+    ///
+    /// What breaks if you change it: the library's `to_string` decodes punycode to Unicode,
+    /// which no blocklist entry is written in, so an internationalized tracker behind an alias
+    /// would pass.
     pub fn cname_targets(&self) -> Vec<String> {
         self.0
             .iter()
             .filter_map(|record| match &record.data {
-                RData::CNAME(target) => Some(
-                    target
-                        .0
-                        .to_string()
-                        .trim_end_matches('.')
-                        .to_ascii_lowercase(),
-                ),
+                RData::CNAME(target) => Name::from_wire(&target.0).map(|name| name.0),
                 _ => None,
             })
             .collect()
@@ -428,5 +427,19 @@ mod tests {
             records.cname_targets(),
             vec!["tracker.evil.net".to_string()]
         );
+    }
+
+    /// Should change: an internationalized alias target stays in `xn--` punycode, the form
+    /// blocklists and query names use, so a list entry for it matches.
+    /// Should not change: the conversion is the same one query names go through.
+    #[test]
+    fn internationalized_alias_targets_stay_in_punycode() {
+        let records = Records::with_cname(
+            &Name::parse("metrics.example.com"),
+            Duration::from_secs(60),
+            "XN--FIQ228C.com",
+            "1.2.3.4".parse().unwrap(),
+        );
+        assert_eq!(records.cname_targets(), vec!["xn--fiq228c.com".to_string()]);
     }
 }
