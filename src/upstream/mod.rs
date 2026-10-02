@@ -28,12 +28,13 @@ use coalesce::Coalescer;
 /// another query on it.
 const DEMOTE_AFTER_FAILURES: u32 = 2;
 
-/// How many upstream queries may be in flight (sent, answer not yet received) at once.
+/// How many requests may be waiting on an upstream answer at once — counting both the one
+/// query sent for a (name, type) and every duplicate waiting for that same answer.
 ///
 /// Ours: Apple, Anthropic and Cloudflare publish no figure. A few hundred devices rarely
 /// wait on more than a handful of uncached answers each at once. What breaks if you change it: without a cap, one device flooding distinct names
-/// can make the gatekeeper open unbounded outbound queries, exhausting both memory and the
-/// upstream's quota.
+/// can make the gatekeeper open unbounded outbound queries, and one flooding a single name
+/// can pile up unbounded waiting requests, exhausting memory either way.
 const MAX_IN_FLIGHT: usize = 300;
 
 /// The result of one upstream query.
@@ -129,14 +130,18 @@ impl Conductor {
     /// What breaks if you change it: remove the deduplication and an attacker can make the
     /// gatekeeper send many simultaneous queries for one name, each a fresh chance to guess a
     /// forged response.
+    ///
+    /// The slot is taken before deduplication, so a request waiting on another's answer holds
+    /// one too. What breaks if you change it: take it after and duplicates of one pending name
+    /// are never turned away, however many arrive.
     pub async fn resolve(&self, query: &Query) -> Outcome {
+        let Ok(_slot) = self.in_flight.try_acquire() else {
+            return Outcome::Busy;
+        };
         self.pending.run(query, || self.resolve_once(query)).await
     }
 
     async fn resolve_once(&self, query: &Query) -> Outcome {
-        let Ok(_slot) = self.in_flight.try_acquire() else {
-            return Outcome::Busy;
-        };
         for index in self.order() {
             let member = &self.members[index];
             match member.exchange.query(query).await {
@@ -305,6 +310,30 @@ mod tests {
         );
         drop(all);
         assert_eq!(c.in_flight.available_permits(), MAX_IN_FLIGHT);
+    }
+
+    /// Should change: a duplicate of a query already waiting on an upstream needs a slot of
+    /// its own, so a flood of one name cannot pile up waiting requests past the limit.
+    /// Should not change: it is turned away at once, not queued behind the first.
+    #[tokio::test]
+    async fn a_duplicate_waiting_on_another_query_still_needs_a_slot() {
+        let c = conductor("listen = 127.0.0.1:5353\nupstream = tls 1.1.1.1 cloudflare-dns.com\n");
+        let query = Query::new(
+            crate::dns::Name::parse("example.com"),
+            crate::dns::RecordType::A,
+        );
+        let first = c.pending.run(&query, std::future::pending::<Outcome>);
+        tokio::pin!(first);
+        assert!(
+            tokio::time::timeout(Duration::ZERO, &mut first)
+                .await
+                .is_err(),
+            "the first query should still be waiting on its upstream"
+        );
+
+        let _all = c.occupy_all();
+        let duplicate = tokio::time::timeout(Duration::from_secs(1), c.resolve(&query)).await;
+        assert!(matches!(duplicate, Ok(Outcome::Busy)));
     }
 
     #[test]
