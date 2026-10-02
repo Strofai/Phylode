@@ -100,21 +100,30 @@ impl RateLimit {
 }
 
 /// Frees space in a full table: windows that have ended go first, and if none has, the least
-/// recently seen sources are forgotten — the way bounded tables in Apple's Private Cloud
-/// Compute make room.
+/// recently seen sources still within their limit are forgotten — the way bounded tables in
+/// Apple's Private Cloud Compute make room. Sources over
+/// their limit are kept until their window ends, unless every tracked source is over it.
 ///
 /// What breaks if you change it: turning new sources away instead lets anyone who fills the
 /// table with forged addresses query without limit from their own; forgetting the busiest
-/// sources instead lets a flooding device keep resetting its own count. A forgotten source
-/// only starts counting again, so this never blocks a device wrongly.
+/// sources, or any source over its limit, lets a flooding device reset its own count by
+/// falling silent while new sources arrive. A forgotten source only starts counting again,
+/// so this never blocks a device wrongly.
 fn make_room(clients: &mut HashMap<IpAddr, Window>, now: Instant) {
     clients.retain(|_, window| now.duration_since(window.started) < WINDOW);
     if clients.len() < MAX_TRACKED {
         return;
     }
-    let mut last_seen: Vec<Instant> = clients.values().map(|window| window.last_seen).collect();
-    let cutoff = *last_seen.select_nth_unstable(FORGET_AT_ONCE - 1).1;
-    clients.retain(|_, window| window.last_seen > cutoff);
+    let any_within_limit = clients.values().any(|window| window.seen <= MAX_PER_WINDOW);
+    let forgettable = |window: &Window| !any_within_limit || window.seen <= MAX_PER_WINDOW;
+    let mut last_seen: Vec<Instant> = clients
+        .values()
+        .filter(|window| forgettable(window))
+        .map(|window| window.last_seen)
+        .collect();
+    let batch = FORGET_AT_ONCE.min(last_seen.len());
+    let cutoff = *last_seen.select_nth_unstable(batch - 1).1;
+    clients.retain(|_, window| !forgettable(window) || window.last_seen > cutoff);
 }
 
 #[cfg(test)]
@@ -210,6 +219,42 @@ mod tests {
         }
         let end = start + Duration::from_millis(u64::from(MAX_PER_WINDOW) + 1);
         assert_eq!(limit.check(device(250), end), Admit::No { first: true });
+    }
+
+    /// Should change: a device over its limit that falls silent while new sources fill the
+    /// table is not forgotten, so it cannot come back to a fresh allowance before its window
+    /// ends. Should not change: room is still made for every new source, and the device is
+    /// answered again once its window has ended.
+    #[test]
+    fn a_device_over_its_limit_is_not_forgotten_to_make_room() {
+        let limit = RateLimit::new();
+        let start = Instant::now();
+        for _ in 0..=MAX_PER_WINDOW {
+            limit.check(device(250), start);
+        }
+        let later = start + Duration::from_secs(1);
+        for n in 0..MAX_TRACKED as u32 * 2 {
+            assert_eq!(limit.check(forged(n), later), Admit::Yes);
+            assert!(limit.clients.lock().unwrap().len() <= MAX_TRACKED);
+        }
+        assert_eq!(limit.check(device(250), later), Admit::No { first: false });
+        assert_eq!(limit.check(device(250), start + WINDOW), Admit::Yes);
+    }
+
+    /// Should not change: when every tracked source is over its limit, room is still made and
+    /// a new device is answered — keeping the network online comes first.
+    #[test]
+    fn a_new_device_is_answered_even_when_every_tracked_source_is_over_its_limit() {
+        let limit = RateLimit::new();
+        let start = Instant::now();
+        for n in 0..MAX_TRACKED as u32 {
+            for _ in 0..=MAX_PER_WINDOW {
+                limit.check(forged(n), start);
+            }
+        }
+        let later = start + Duration::from_secs(1);
+        assert_eq!(limit.check(device(250), later), Admit::Yes);
+        assert!(limit.clients.lock().unwrap().len() <= MAX_TRACKED);
     }
 
     /// Should change: making room forgets a whole batch at once, so the next new sources are
