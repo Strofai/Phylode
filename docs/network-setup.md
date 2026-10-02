@@ -17,6 +17,15 @@ step doesn't match yours, [open an issue](https://github.com/Strofai/Phylode/iss
   address on the network, such as `192.168.1.20`. You'll need it below.
 - Keep the Mac on and awake while it serves the network. In System Settings, you can
   choose to prevent your Mac from sleeping automatically when the display is off.
+- Plan for a power outage. On a Mac desktop computer, choose Apple menu > System
+  Settings, click Energy, then turn on "Start up automatically after a power failure"
+  ([Apple Support](https://support.apple.com/guide/mac-help/change-energy-settings-mchlp1168/mac)).
+  If FileVault is turned on, the Mac stops at the login window after it restarts, and
+  Phylode can't start until the disk is unlocked — until then, devices on the network can't
+  look anything up. Log in once after an outage, or turn on Remote Login and unlock the
+  disk over SSH from another device (macOS Tahoe 26 or later,
+  [Apple Support](https://support.apple.com/en-us/124963)). Turning FileVault off removes
+  the wait, but leaves everything on the disk unencrypted, including the query journal.
 - Have your router's admin page or app ready. The address is often printed on the router,
   and is usually something like `192.168.1.1` or `192.168.0.1`.
 
@@ -104,6 +113,8 @@ be reached — set it back to automatic before taking the Mac elsewhere.
 
 - **Nothing loads on some devices:** they may be using a public IPv6 address for your Mac
   that Phylode isn't set up to answer (step 3), or your Mac may be asleep or off.
+- **Nothing loads after a power outage:** if FileVault is on, the Mac is waiting at the
+  login window. Log in, or unlock it over SSH ([Before you begin](#before-you-begin)).
 - **Ads still appear on one device:** it may use its own encrypted DNS (some browsers and
   apps do), iCloud Private Relay, or DNS settings set by hand. Phylode can't filter those.
 - **To undo everything,** clear the DNS server fields you changed in step 2 and step 3.
