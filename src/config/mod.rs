@@ -42,6 +42,12 @@ pub enum ConfigError {
     #[error("line {line} has a value `{key}` cannot use")]
     BadValue { line: usize, key: String },
     #[error(
+        "line {line} serves every address, which would let anyone on the internet use this \
+         Mac, including to attack others; list only the networks your devices are on, such as \
+         198.51.100.0/24"
+    )]
+    EveryAddress { line: usize },
+    #[error(
         "block_ttl_secs is {}, above the limit of {} — devices would keep a blocked answer that \
          long, so allowing a domain would appear not to work",
         got.as_secs(),
@@ -313,7 +319,14 @@ impl Config {
                     }
                     internal_domains.push(value.to_string());
                 }
-                "serve_network" => served_networks.push(value.parse().map_err(|()| bad())?),
+                "serve_network" => {
+                    let network: IpNetwork = value.parse().map_err(|()| bad())?;
+                    // A /0 answers the whole internet: an open resolver, usable for reflection.
+                    if network.prefix == 0 {
+                        return Err(ConfigError::EveryAddress { line });
+                    }
+                    served_networks.push(network);
+                }
                 _ => {
                     return Err(ConfigError::UnknownKey { line });
                 }
@@ -439,6 +452,26 @@ mod tests {
             Config::parse(&text),
             Err(ConfigError::UnknownKey { .. })
         ));
+    }
+
+    /// Should change: a serve_network covering every address is refused, so the Mac cannot be
+    /// configured into a resolver anyone on the internet can use.
+    /// Should not change: an ordinary public network, IPv4 or IPv6, is still accepted.
+    #[test]
+    fn serving_every_address_is_refused() {
+        for everything in ["0.0.0.0/0", "::/0"] {
+            let text = format!("{MINIMAL}\nserve_network = {everything}");
+            let error = Config::parse(&text).expect_err("this would be an open resolver");
+            assert!(
+                matches!(error, ConfigError::EveryAddress { line: 5 }),
+                "{error:?}"
+            );
+            assert!(error.to_string().contains("anyone"), "{error}");
+        }
+        for network in ["198.51.100.0/24", "2001:db8:1:2::/64"] {
+            let text = format!("{MINIMAL}\nserve_network = {network}");
+            assert_eq!(Config::parse(&text).unwrap().served_networks().len(), 1);
+        }
     }
 
     /// Should change: an error names the line and, for a bad value, the setting — never the
