@@ -60,11 +60,8 @@ pub fn render(facts: &Facts) -> String {
             render_events(&mut out, &facts.events);
         }
         Err(error) => {
-            let _ = writeln!(
-                out,
-                "Configuration: could not be read: {}",
-                describe_config_error(error)
-            );
+            // `ConfigError` never repeats what the file says, so it can be printed as it is.
+            let _ = writeln!(out, "Configuration: could not be read: {error}");
         }
     }
 
@@ -173,26 +170,6 @@ fn render_events(out: &mut String, events: &[(String, String)]) {
     }
 }
 
-/// Says what is wrong with the configuration by line and key only.
-///
-/// What breaks if you change it: printing the error as it displays (`to_string`) quotes the
-/// offending line, which is where an internal domain or a private upstream name would be.
-/// The key is safe to print for an invalid value — only recognised keys get that far — but
-/// not for an unrecognised one, which can be any text at all.
-fn describe_config_error(error: &ConfigError) -> String {
-    match error {
-        ConfigError::MissingEquals { line, .. } => format!("line {line} has no equals sign"),
-        ConfigError::UnknownKey { line, .. } => format!("line {line} has an unrecognized key"),
-        ConfigError::BadValue { line, key, .. } => {
-            format!("line {line} has an invalid value for `{key}`")
-        }
-        ConfigError::Io { source } => format!("the file could not be opened ({source})"),
-        ConfigError::BlockTtlTooLong { .. } | ConfigError::NoUpstream | ConfigError::NoListen => {
-            error.to_string()
-        }
-    }
-}
-
 fn count_or_unreadable(count: Option<usize>) -> String {
     count.map_or_else(|| "could not be read".to_string(), |n| n.to_string())
 }
@@ -281,24 +258,32 @@ mod tests {
     }
 
     /// Should change: a configuration that fails to parse is described by line and key, never
-    /// by the text on that line.
+    /// by the text on that line — in the configuration section and in the service log, where
+    /// the service wrote the same error when it failed to start.
     /// Should not change: the reason (which line, which key) is still there.
     #[test]
     fn a_broken_configuration_is_described_without_its_values() {
         for (text, expected) in [
             (
                 "upstream = tls 198.51.100.7 private-doh.example.net extra\n",
-                "line 1 has an invalid value for `upstream`",
+                "line 1 has a value `upstream` cannot use",
             ),
-            ("nas.example.lan\n", "line 1 has no equals sign"),
+            (
+                "nas.example.lan\n",
+                "line 1 is not in the form `key = value`",
+            ),
             (
                 "office_nas = nas.example.lan\n",
-                "line 1 has an unrecognized key",
+                "line 1 is not a setting Phylode knows",
             ),
         ] {
             let error = Config::parse(text).unwrap_err();
             let report = render(&Facts {
                 config: Err(&error),
+                log: Ok(format!(
+                    "Could not use the configuration file /usr/local/etc/phylode/phylode.conf: \
+                     {error}\n"
+                )),
                 ..facts_without_config()
             });
             for secret in [

@@ -25,21 +25,22 @@ const DEFAULT_CACHE_CAPACITY: usize = 20_000;
 const DEFAULT_STALE_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const DEFAULT_JOURNAL_RETENTION_DAYS: u32 = 10;
 
+/// Why the configuration file cannot be used.
+///
+/// What breaks if you change it: messages name the line and the setting, never what is written
+/// there. They reach the service log, and `phylode diagnose` copies that log into reports
+/// people post publicly — a host name or address in the file would go with it.
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("line {line} is not in the form `key = value`: {text}")]
-    MissingEquals { line: usize, text: String },
+    #[error("line {line} is not in the form `key = value`")]
+    MissingEquals { line: usize },
     #[error(
-        "line {line} uses `{key}`, which is not a setting Phylode knows; check the spelling \
-         against the comments in the default configuration"
+        "line {line} is not a setting Phylode knows; check its spelling against the comments \
+         in the default configuration"
     )]
-    UnknownKey { line: usize, key: String },
-    #[error("line {line} has a value `{key}` cannot use: {value}")]
-    BadValue {
-        line: usize,
-        key: String,
-        value: String,
-    },
+    UnknownKey { line: usize },
+    #[error("line {line} has a value `{key}` cannot use")]
+    BadValue { line: usize, key: String },
     #[error(
         "block_ttl_secs is {}, above the limit of {} — devices would keep a blocked answer that \
          long, so allowing a domain would appear not to work",
@@ -277,20 +278,16 @@ impl Config {
                 continue;
             }
 
-            let (key, value) =
-                content
-                    .split_once('=')
-                    .ok_or_else(|| ConfigError::MissingEquals {
-                        line,
-                        text: content.to_string(),
-                    })?;
+            let (key, value) = content
+                .split_once('=')
+                .ok_or(ConfigError::MissingEquals { line })?;
             let key = key.trim();
             let value = unquote(value.trim());
 
+            // Only called from the arms below, so `key` is always one of Phylode's settings.
             let bad = || ConfigError::BadValue {
                 line,
                 key: key.to_string(),
-                value: value.to_string(),
             };
 
             match key {
@@ -318,10 +315,7 @@ impl Config {
                 }
                 "serve_network" => served_networks.push(value.parse().map_err(|()| bad())?),
                 _ => {
-                    return Err(ConfigError::UnknownKey {
-                        line,
-                        key: key.to_string(),
-                    });
+                    return Err(ConfigError::UnknownKey { line });
                 }
             }
         }
@@ -445,6 +439,24 @@ mod tests {
             Config::parse(&text),
             Err(ConfigError::UnknownKey { .. })
         ));
+    }
+
+    /// Should change: an error names the line and, for a bad value, the setting — never the
+    /// text written there. The service log carries these messages, and the diagnostics report
+    /// copies the service log into public issues.
+    #[test]
+    fn errors_never_repeat_what_the_file_says() {
+        for (extra, written) in [
+            ("printer.home.example", "printer.home.example"),
+            ("nas.home.example = 1", "nas.home.example"),
+            ("serve_network = 192.0.2.7/99", "192.0.2.7"),
+        ] {
+            let message = Config::parse(&format!("{MINIMAL}\n{extra}"))
+                .expect_err("each of these lines is wrong")
+                .to_string();
+            assert!(message.contains("line "), "{message}");
+            assert!(!message.contains(written), "{message}");
+        }
     }
 
     #[test]
