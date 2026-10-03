@@ -141,6 +141,8 @@ struct State {
     /// Records the answer path could not queue, and how many of those already have an event.
     dropped: Arc<AtomicU64>,
     reported_dropped: u64,
+    /// Records that reached this thread but could not be written, not yet in an event.
+    unwritten: u64,
 }
 
 /// A writer that rolls over to a new file each day.
@@ -148,6 +150,8 @@ struct DayFile {
     path_for: fn(&Path, &str) -> PathBuf,
     open_date: Option<String>,
     writer: Option<BufWriter<File>>,
+    /// When a failed open may be tried again.
+    retry_at: Option<Instant>,
 }
 
 impl DayFile {
@@ -156,14 +160,29 @@ impl DayFile {
             path_for,
             open_date: None,
             writer: None,
+            retry_at: None,
         }
     }
 
+    /// Appends one line to the day's file. A file that would not open is tried again at most
+    /// once per [`FLUSH_INTERVAL`].
+    ///
+    /// What breaks if you change it: without the retry, one failed open (a full disk for a
+    /// moment) loses the rest of that day's records; retrying on every record instead costs a
+    /// failing system call per query while the disk stays full.
     fn write(&mut self, directory: &Path, date: &str, line: &str) -> bool {
         if self.open_date.as_deref() != Some(date) {
             self.flush();
-            self.writer = open_day_file(&(self.path_for)(directory, date));
+            self.writer = None;
+            self.retry_at = None;
             self.open_date = Some(date.to_string());
+        }
+        if self.writer.is_none() && self.retry_at.is_none_or(|at| Instant::now() >= at) {
+            self.writer = open_day_file(&(self.path_for)(directory, date));
+            self.retry_at = self
+                .writer
+                .is_none()
+                .then(|| Instant::now() + FLUSH_INTERVAL);
         }
         let Some(writer) = self.writer.as_mut() else {
             return false;
@@ -191,16 +210,24 @@ impl State {
             last_flush: Instant::now(),
             dropped,
             reported_dropped: 0,
+            unwritten: 0,
         }
     }
 
     fn push(&mut self, entry: &Entry) {
+        if !self.write(entry) {
+            self.unwritten += 1;
+        }
+    }
+
+    /// Writes one entry and says whether it was written.
+    fn write(&mut self, entry: &Entry) -> bool {
         let (at, line, is_event) = match entry {
             Entry::Query(record) => (record.at, format_line(record, &self.zone), false),
             Entry::Event(event) => (event.at, format_event(event, &self.zone), true),
             // The main loop intercepts this first, so it never reaches here; if it did, it
             // would simply write no line.
-            Entry::Flush(_) => return,
+            Entry::Flush(_) => return true,
         };
         let date = Civil::from_unix(unix_seconds(at), &self.zone).date_string();
 
@@ -212,6 +239,7 @@ impl State {
         if written {
             self.pending += 1;
         }
+        written
     }
 
     /// Whether the records in hand should be written to disk now.
@@ -236,23 +264,33 @@ impl State {
         self.last_flush = Instant::now();
     }
 
-    /// Writes a "records dropped" event for records dropped since the last one. Written here
-    /// rather than sent through the channel, because a full channel is why they were dropped.
+    /// Writes a "records dropped" event for records lost since the last one: those the answer
+    /// path could not queue, and those that could not be written. Written here rather than
+    /// sent through the channel, because a full channel is one reason they were lost. A count
+    /// is cleared only once its event is written, so a journal that cannot be written reports
+    /// the loss when it can.
     ///
     /// What breaks if you change it: item 7 of the weekly summary reads only these events; the
-    /// counter on its own is never seen by anyone.
+    /// counters on their own are never seen by anyone.
     fn note_dropped(&mut self) {
         let total = self.dropped.load(Ordering::Relaxed);
         let lost = total.saturating_sub(self.reported_dropped);
-        if lost == 0 {
-            return;
+        if lost > 0 && self.write_dropped(lost, "the journal could not keep up") {
+            self.reported_dropped = total;
         }
-        self.reported_dropped = total;
-        self.push(&Entry::Event(Event {
+        if self.unwritten > 0
+            && self.write_dropped(self.unwritten, "the journal file could not be written")
+        {
+            self.unwritten = 0;
+        }
+    }
+
+    fn write_dropped(&mut self, count: u64, reason: &str) -> bool {
+        self.write(&Entry::Event(Event {
             at: SystemTime::now(),
             kind: EventKind::RecordsDropped,
-            detail: format!("{lost} not written; the journal could not keep up"),
-        }));
+            detail: format!("{count} not written; {reason}"),
+        }))
     }
 }
 
@@ -399,6 +437,56 @@ mod tests {
         assert!(
             text.lines()
                 .all(|line| line.contains("\trecords-dropped\t"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: when the day's file cannot be opened (a full disk, a folder that cannot
+    /// be written), the records are counted, opening is tried again, and once it works an
+    /// event says how many were lost — so the weekly summary does not call the day complete.
+    /// Should not change: records arriving after the file opens are written as usual.
+    #[test]
+    fn records_that_could_not_be_written_are_reported_once_writing_works_again() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("unwritable");
+        let mut state = State::new(
+            dir.clone(),
+            LocalZone::fixed_hours(8),
+            Arc::new(AtomicU64::new(0)),
+        );
+        let query = |name: &str| {
+            Entry::Query(super::super::Record {
+                at: SystemTime::now(),
+                client: "192.168.1.20".parse().unwrap(),
+                name: name.to_string(),
+                record_type: "A".into(),
+                disposition: super::super::Disposition::Allowed,
+                reason: "".into(),
+            })
+        };
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        state.push(&query("lost.example.com"));
+        state.flush();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(file_names(&dir).is_empty(), "nothing could be written");
+
+        std::thread::sleep(FLUSH_INTERVAL);
+        state.push(&query("kept.example.com"));
+        state.flush();
+
+        let mut text = String::new();
+        for name in file_names(&dir) {
+            text += &std::fs::read_to_string(dir.join(name)).unwrap();
+        }
+        assert!(text.contains("kept.example.com"), "{text}");
+        assert!(!text.contains("lost.example.com"), "{text}");
+        assert!(
+            text.contains(
+                "\trecords-dropped\t1 not written; the journal file could not be written"
+            ),
+            "{text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
