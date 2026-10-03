@@ -182,7 +182,7 @@ impl EventKind {
                 "no blocklist could be loaded; nothing was blocked during this window"
             }
             Self::BlocklistKept => {
-                "a blocklist update could not be used; the previous list stayed in use"
+                "a blocklist could not be used; blocking continued with the lists already loaded"
             }
             Self::AllowlistFailed => {
                 "allowlist could not be read; domains you allowed may have been blocked again \

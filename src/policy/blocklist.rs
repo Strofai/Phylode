@@ -128,24 +128,33 @@ impl Blocklist {
 
     /// Reads every source file and swaps the whole set in at once.
     ///
-    /// If any file in `required` cannot be read, or they yield 0 domains between them, the
-    /// entire batch is abandoned and the existing list stays in place. `optional` holds
-    /// files whose absence is normal — for instance the one that only exists once
-    /// `phylode block` has been used.
+    /// If any file in `required` cannot be read, if they yield 0 domains between them, or if
+    /// an `optional` file exists but cannot be read, the load fails: a list already loaded
+    /// stays in place whole, and with none loaded yet the files that did read are used.
+    /// `optional` holds files whose absence is normal — for instance the one that only
+    /// exists once `phylode block` has been used.
     ///
-    /// What breaks if you change it: a failure must never clear the existing list — that
-    /// would escalate "the update failed" into "nothing is blocked".
+    /// What breaks if you change it: a failure must never clear or shrink the existing list —
+    /// that would escalate "the update failed" into "less is blocked". And with nothing loaded
+    /// yet, discarding the files that read means one missing download leaves the whole network
+    /// unfiltered from startup.
     pub fn load_all(
         &self,
         required: &[impl AsRef<Path>],
         optional: &[impl AsRef<Path>],
     ) -> Result<usize, BlocklistError> {
         let mut domains = HashSet::new();
+        let mut failure = None;
 
         for path in required {
-            parse_into(&read_list(path.as_ref())?, &mut domains);
+            match read_list(path.as_ref()) {
+                Ok(text) => parse_into(&text, &mut domains),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
         }
-        if domains.is_empty() {
+        if domains.is_empty() && failure.is_none() {
             return Err(BlocklistError::Empty(required.len()));
         }
 
@@ -155,11 +164,21 @@ impl Blocklist {
                 // Not created yet simply means nothing has been blocked by hand; not an error.
                 Err(BlocklistError::Read { source, .. })
                     if source.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
             }
         }
 
-        Ok(self.install(domains))
+        match failure {
+            None => Ok(self.install(domains)),
+            Some(error) => {
+                if self.snapshot().is_none() && !domains.is_empty() {
+                    self.install(domains);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Swaps in a list from contents already in hand. Used by the tests and the blocklist
@@ -217,6 +236,7 @@ fn is_ip_literal(field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn set(domains: &[&str]) -> DomainSet {
         DomainSet {
@@ -289,6 +309,48 @@ mod tests {
             list.lookup("ads.example.com"),
             Verdict::Blocked,
             "an empty update must not replace the list that was already loaded"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: with no list loaded yet (the service has just started), a file that
+    /// cannot be read no longer leaves the network with no blocking at all — the files that
+    /// did read are used, and the failure is still reported.
+    /// Should not change: once a list is loaded, a failed update keeps that list whole.
+    #[test]
+    fn at_startup_the_lists_that_read_are_used_even_if_one_does_not() {
+        let dir = std::env::temp_dir().join(format!("phylode-bl-part-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tier = dir.join("tier.txt");
+        let threats = dir.join("threats.txt");
+        let missing = dir.join("not-downloaded-yet.txt");
+        let unreadable = dir.join("block.txt");
+        std::fs::write(&tier, "ads.example.com\n").unwrap();
+        std::fs::write(&threats, "phish.example.net\n").unwrap();
+        std::fs::write(&unreadable, "mine.example.org\n").unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let fresh = Blocklist::new();
+        assert!(fresh.load_all(&[&tier, &missing], &[] as &[&Path]).is_err());
+        assert_eq!(fresh.lookup("ads.example.com"), Verdict::Blocked);
+
+        let fresh = Blocklist::new();
+        assert!(fresh.load_all(&[&tier], &[&unreadable]).is_err());
+        assert_eq!(fresh.lookup("ads.example.com"), Verdict::Blocked);
+
+        let running = Blocklist::new();
+        running
+            .load_all(&[&tier, &threats], &[] as &[&Path])
+            .unwrap();
+        assert!(
+            running
+                .load_all(&[&tier, &missing], &[] as &[&Path])
+                .is_err()
+        );
+        assert_eq!(
+            running.lookup("phish.example.net"),
+            Verdict::Blocked,
+            "an update missing a file must not shrink the list already loaded"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

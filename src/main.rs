@@ -298,10 +298,17 @@ fn status(config_path: &Path) -> ExitCode {
             "  {} domains will be blocked in total",
             blocklist.loaded_len().unwrap_or(0)
         ),
-        Err(error) => println!(
-            "  Warning: {error}. The service keeps any list it loaded before, but would start \
-             with none if it restarted now"
-        ),
+        Err(error) => match blocklist.loaded_len() {
+            Some(loaded) => println!(
+                "  Warning: {error}. The service keeps any list it loaded before; if it \
+                 restarted now it would start with only the lists that read ({})",
+                plural(loaded, "domain", "domains")
+            ),
+            None => println!(
+                "  Warning: {error}. The service keeps any list it loaded before, but would \
+                 start with none if it restarted now"
+            ),
+        },
     }
     match config.user_blocklist() {
         Some(path) => println!(
@@ -792,15 +799,16 @@ async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Optio
                 );
             }
         }
-        // A failed load leaves any list loaded before in place, so whether the network is
-        // unprotected depends on whether there was one; the journal has to tell them apart or
-        // the weekly summary reports a gap that did not happen.
+        // A failed load leaves any list loaded before in place, or at startup uses the files
+        // that did read, so whether the network is unprotected depends on whether anything is
+        // loaded now; the journal has to tell them apart or the weekly summary reports a gap
+        // that did not happen.
         Err(error) => match blocklist.loaded_len() {
-            Some(previous) => {
+            Some(loaded) => {
                 eprintln!(
-                    "Blocklist update not used: {error}. Still blocking with the previous list \
-                     ({}).",
-                    plural(previous, "domain", "domains")
+                    "Not every blocklist could be used: {error}. Still blocking with the lists \
+                     already loaded ({}).",
+                    plural(loaded, "domain", "domains")
                 );
                 if let Some(journal) = journal.as_ref() {
                     journal.event(EventKind::BlocklistKept, error.to_string());

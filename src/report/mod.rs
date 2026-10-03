@@ -613,7 +613,7 @@ mod tests {
         let text = s.render();
         let item_three = &text[text.find("3. ").unwrap()..text.find("4. ").unwrap()];
         assert!(
-            item_three.contains("the previous list stayed in use"),
+            item_three.contains("blocking continued with the lists already loaded"),
             "{item_three}"
         );
         assert!(text.contains("No — protection was continuous."), "{text}");
