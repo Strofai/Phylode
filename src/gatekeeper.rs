@@ -46,6 +46,8 @@ pub struct Gatekeeper {
     block_ttl: Duration,
     rebind_guard: RebindGuard,
     rate_limit: RateLimit,
+    /// The Apple hard rules' own allowance, counted apart from `rate_limit`.
+    apple_rate_limit: RateLimit,
     served: ServedNetworks,
     own_addresses: Vec<IpAddr>,
 }
@@ -85,6 +87,7 @@ impl Gatekeeper {
             block_ttl,
             rebind_guard,
             rate_limit: RateLimit::new(),
+            apple_rate_limit: RateLimit::new(),
             served: ServedNetworks::new(&[]),
             own_addresses: Vec::new(),
         }
@@ -198,15 +201,18 @@ impl Gatekeeper {
     }
 
     /// Whether `client` gets any response, counting this request against its rate limit.
-    /// `apple_service` exempts the request from the rate limit, not from the served networks.
+    /// `apple_service` counts the request against the Apple allowance instead of the ordinary
+    /// one; it does not exempt it from the served networks.
     ///
     /// A device outside the served networks is not one of the devices this is for: it is not
     /// journalled, and only its first request is recorded as an event. A device querying too
     /// often goes unanswered for the rest of the window, with only the first excess recorded —
     /// a flood would otherwise flood the journal too.
-    /// Apple hard rules are exempt from rate limiting: source addresses on a LAN can be forged,
-    /// and a device that cannot reach captive/push falls back to an unfiltered resolver, which
-    /// is a way around the gatekeeper entirely.
+    ///
+    /// What breaks if you change it: the two allowances must stay apart. Shared, a device that
+    /// used up its ordinary allowance (and source addresses on a LAN can be forged) could not
+    /// reach captive/push and falls back to an unfiltered resolver. Exempting Apple's hosts
+    /// altogether instead lets any device send made-up names under `push.apple.com` without end.
     fn admit(&self, client: IpAddr, apple_service: bool) -> bool {
         if let Admit::No { first } = self.served.admit(client) {
             if first && let Some(journal) = self.journal.as_ref() {
@@ -214,13 +220,17 @@ impl Gatekeeper {
             }
             return false;
         }
-        if !apple_service && let Admit::No { first } = self.rate_limit.check(client, Instant::now())
-        {
+        let (limit, kind) = if apple_service {
+            (&self.apple_rate_limit, "queries for Apple's services")
+        } else {
+            (&self.rate_limit, "queries")
+        };
+        if let Admit::No { first } = limit.check(client, Instant::now()) {
             if first && let Some(journal) = self.journal.as_ref() {
                 journal.event(
                     EventKind::RateLimited,
                     format!(
-                        "{client} made more than {} queries in one minute",
+                        "{client} made more than {} {kind} in one minute",
                         crate::policy::ratelimit::MAX_PER_WINDOW
                     ),
                 );
@@ -1139,6 +1149,36 @@ mod tests {
             "a rate-limited device that cannot reach captive.apple.com falls back to an \
              unfiltered resolver"
         );
+    }
+
+    /// Should change: Apple's hosts have a limit of their own, so made-up names under
+    /// `push.apple.com` can no longer be sent without end.
+    /// Should not change: using up the Apple allowance leaves the ordinary one untouched, and
+    /// the other way round (the test above).
+    #[tokio::test]
+    async fn apple_hosts_have_their_own_allowance() {
+        let blocklist = Blocklist::new();
+        blocklist.load_from_str("ads.example.com");
+        let (gatekeeper, _) = parts(blocklist);
+        let _all = gatekeeper.conductor.occupy_all();
+        let noisy: IpAddr = "192.168.1.20".parse().unwrap();
+        for n in 0..crate::policy::ratelimit::MAX_PER_WINDOW {
+            let made_up = query(&format!("x{n}.push.apple.com"));
+            assert!(!matches!(
+                gatekeeper.respond(&made_up, noisy).await,
+                Response::Ignored
+            ));
+        }
+        assert!(matches!(
+            gatekeeper
+                .respond(&query("over.push.apple.com"), noisy)
+                .await,
+            Response::Ignored
+        ));
+        assert!(matches!(
+            gatekeeper.respond(&query("ads.example.com"), noisy).await,
+            Response::Blocked { .. }
+        ));
     }
 
     /// Should change: with the cache lock seized, the health check probe cannot be answered
