@@ -84,7 +84,8 @@ Run this once before starting work and put the result in the first paragraph of 
   `cargo deny` on every push and pull request; run the same locally before pushing.
   `install.yml` runs `phylode install`, `on`, `off` and `uninstall` for real on a throwaway
   macOS runner whenever `src/` or `deploy/` changes — that is where installation gets verified, not
-  on a contributor's own machine.
+  on a contributor's own machine. `live.yml` drives a release build from 5003 source addresses on
+  a throwaway runner whenever the rate limit changes, for behaviour one Mac cannot produce.
 
 ## Commits and pushes
 
