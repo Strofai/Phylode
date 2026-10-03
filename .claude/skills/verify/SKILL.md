@@ -49,3 +49,14 @@ packets, send a well-formed query first.
 - A pipeline's exit status is the last command's, not the script's.
 - `nc` keeps running until its input ends even after the service closes the connection;
   judge TCP from the service's side with `lsof`, not from how long `nc` ran.
+- `$TMPDIR` points somewhere different inside and outside the command sandbox. Write the
+  scratch directory's absolute path into a variable once and reuse it, or processes started
+  from one side cannot find files written from the other.
+
+## Clean up before reporting
+
+The Mac running these checks is the owner's own machine, so a verification leaves nothing
+behind. Before writing the report, stop every instance you started, remove every worktree
+and scratch directory you created, and show that they are gone: `pgrep -fl phylode` finds
+no instance, `git worktree list` shows only the main checkout, and the scratch paths no
+longer exist. Put that output in the report.
