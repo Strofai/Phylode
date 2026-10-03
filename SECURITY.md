@@ -22,7 +22,7 @@ There are no releases yet. Only the latest `main` is supported.
   crashes the service, hangs it, or exhausts its memory.
 - Anything that makes `captive.apple.com`, `*.push.apple.com` or the other hard-coded Apple
   hosts fail to resolve.
-- A way past the DNS rebinding protection or the per-device rate limit.
+- A way past the DNS rebinding protection or the per-address rate limit.
 - A way to get any answer from outside the networks the service serves, which would make it
   usable in reflection attacks.
 - Query data leaving the machine other than the encrypted query to the chosen upstream.
@@ -37,6 +37,13 @@ There are no releases yet. Only the latest `main` is supported.
   names entirely outside Phylode.
 - **IPv6 can bypass IPv4-only setups.** If the router also advertises its own IPv6
   DNS servers, devices may use them instead and skip filtering.
+- **The rate limit counts each source address.** A device that changes its IPv6 address,
+  or one that sends packets with forged source addresses, gets a separate allowance for
+  each address it uses.
+- **A failed DNSSEC check is recorded, not blocked.** When the upstream reports that an
+  answer's signature did not validate, Phylode still returns the answer, so a domain with
+  broken signatures stays reachable, and records it in the query journal. A device that
+  needs validated answers has to validate them itself.
 - **Anyone on a served network can use it.** On a shared network, such as a café or a
   hotel, that includes strangers, and their queries are recorded in the query journal.
   Phylode is meant for a Mac that stays on one network; on a laptop that travels, run
