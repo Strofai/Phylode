@@ -197,6 +197,9 @@ impl Exchange {
                 response.answers.to_vec(),
             ))),
             Err(NetError::Dns(DnsError::NoRecordsFound(empty))) => Ok(negative(&empty)),
+            // Any other response code (REFUSED, NOTIMP, FORMERR…) is still an answer: counted
+            // as the upstream failing, a device asking for zone transfers would demote it.
+            Err(NetError::Dns(DnsError::ResponseCode(_))) => Ok(Answer::ServerFailure),
             Err(source) => Err(ExchangeError::Query {
                 server_name: self.server_name.clone(),
                 source,
@@ -289,6 +292,32 @@ mod tests {
             negative(&empty_response(ResponseCode::NoError, Some(30))),
             Answer::NoRecordsOfType { .. }
         ));
+    }
+
+    /// Should change: an upstream that answers with a refusal or "not implemented" (as it does
+    /// for zone transfers and other unusual types) has answered, so it is an answered failure.
+    /// Should not change: a connection that never answers is still the upstream's failure.
+    #[test]
+    fn a_refusal_from_the_upstream_is_an_answer_not_an_outage() {
+        let exchange = Exchange::connect(&upstream("tls 1.1.1.1 cloudflare-dns.com")).unwrap();
+        for code in [
+            ResponseCode::Refused,
+            ResponseCode::NotImp,
+            ResponseCode::FormErr,
+        ] {
+            assert!(
+                matches!(
+                    exchange.classify(Err(NetError::Dns(DnsError::ResponseCode(code)))),
+                    Ok(Answer::ServerFailure)
+                ),
+                "{code:?}"
+            );
+        }
+        assert!(
+            exchange
+                .classify(Err(NetError::from("the connection timed out")))
+                .is_err()
+        );
     }
 
     #[test]
