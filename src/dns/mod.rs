@@ -46,11 +46,20 @@ impl Name {
         &self.0
     }
 
-    /// Builds from text, normalizing to lowercase with no trailing dot.
-    /// The allow/block commands and the tests both go through this, so they share exactly the
-    /// normalization applied to names arriving from the wire.
+    /// Builds from text already in ASCII form, normalizing to lowercase with no trailing dot.
+    /// Unicode is kept as it is; text a person typed goes through [`Name::from_typed`].
     pub fn parse(text: &str) -> Self {
         Self(text.trim_end_matches('.').to_ascii_lowercase())
+    }
+
+    /// Builds from a name a person typed, converting an internationalized domain to the
+    /// `xn--` form queries arrive in. Returns `None` for text that is not a domain.
+    ///
+    /// What breaks if you change it: skip the conversion and `phylode allow bücher.de` is
+    /// stored in Unicode, which no query ever matches — the allow silently does nothing.
+    pub fn from_typed(text: &str) -> Option<Self> {
+        let wire = hickory_proto::rr::Name::from_utf8(text.trim()).ok()?;
+        Self::from_wire(&wire)
     }
 
     /// Builds from a wire-format name. Returns `None` for anything that does not convert back

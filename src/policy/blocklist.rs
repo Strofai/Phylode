@@ -202,7 +202,8 @@ fn parse_into(text: &str, out: &mut HashSet<String>) {
 
         for candidate in candidates {
             let domain = candidate.trim_end_matches('.').to_ascii_lowercase();
-            if is_plausible_domain(&domain) {
+            // Also drops local entries common in hosts files, such as `localhost`.
+            if super::is_list_domain(&domain) {
                 out.insert(domain);
             }
         }
@@ -211,20 +212,6 @@ fn parse_into(text: &str, out: &mut HashSet<String>) {
 
 fn is_ip_literal(field: &str) -> bool {
     field.parse::<std::net::IpAddr>().is_ok()
-}
-
-/// Rejects local entries common in hosts files, such as `localhost`, along with anything
-/// that does not look like a domain.
-fn is_plausible_domain(domain: &str) -> bool {
-    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
-        return false;
-    }
-    domain
-        .split('.')
-        .all(|label| !label.is_empty() && label.len() <= 63)
-        && domain
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
 }
 
 #[cfg(test)]

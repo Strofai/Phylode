@@ -16,7 +16,10 @@ use crate::dns::Name;
 
 #[derive(Debug, Error)]
 pub enum CliError {
-    #[error("`{value}` does not look like a domain")]
+    #[error(
+        "`{value}` does not look like a domain; write it like example.com, which also covers \
+         everything under it"
+    )]
     NotADomain { value: String },
     #[error("the configuration does not set {key}, so there is nowhere to write")]
     MissingPath { key: &'static str },
@@ -121,16 +124,15 @@ pub fn block(
     Ok(Outcome::Blocked { domain, changed })
 }
 
-/// Normalizes the input and checks that it looks like a domain. Empty strings and anything
-/// without a dot are rejected.
+/// Converts the input to the form the lists store and queries arrive in, refusing anything
+/// the lists would drop when they load.
 fn normalize(value: &str) -> Result<String, CliError> {
-    let domain = Name::parse(value.trim()).as_str().to_string();
-    if domain.is_empty() || !domain.contains('.') || domain.contains(char::is_whitespace) {
-        return Err(CliError::NotADomain {
+    Name::from_typed(value)
+        .map(|name| name.as_str().to_string())
+        .filter(|domain| crate::policy::is_list_domain(domain))
+        .ok_or_else(|| CliError::NotADomain {
             value: value.to_string(),
-        });
-    }
-    Ok(domain)
+        })
 }
 
 /// Adds one line. Returns `false` when it was already there, without writing a duplicate.
@@ -272,6 +274,29 @@ mod tests {
             "it must no longer be on the blocklist"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: an internationalized domain is stored in the `xn--` form queries
+    /// arrive in, so allowing or blocking it takes effect.
+    #[test]
+    fn internationalized_domains_are_stored_in_punycode() {
+        assert_eq!(normalize("Bücher.de").unwrap(), "xn--bcher-kva.de");
+    }
+
+    /// Should change: entries the lists would silently drop are refused when typed, rather
+    /// than reported as allowed or blocked.
+    #[test]
+    fn entries_the_lists_would_ignore_are_rejected() {
+        for bad in [
+            "*.ads.example.com",
+            "https://ads.example.com/path",
+            "ads..example.com",
+        ] {
+            assert!(
+                matches!(normalize(bad), Err(CliError::NotADomain { .. })),
+                "{bad:?} should have been rejected"
+            );
+        }
     }
 
     #[test]

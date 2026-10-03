@@ -17,6 +17,25 @@ pub use clients::ServedNetworks;
 pub use ratelimit::{Admit, RateLimit};
 pub use rebinding::{RebindGuard, Rebinding};
 
+/// Whether a lowercase entry can match a query name: at least two labels, each 1–63
+/// characters of ASCII letters, digits, `-` or `_`, 253 at most in all. The blocklist, the
+/// allowlist and the `allow`/`block` commands all go through this.
+///
+/// What breaks if you change it: an entry the lists accept but no query can match (a `*.`
+/// wildcard, a URL, Unicode instead of `xn--`) is reported as allowed or blocked and silently
+/// does nothing.
+pub(crate) fn is_list_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 || !domain.contains('.') {
+        return false;
+    }
+    domain
+        .split('.')
+        .all(|label| !label.is_empty() && label.len() <= 63)
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
 /// Matches if `hit` holds for the name itself or any of its parents (`ads.example.com` tries
 /// `ads.example.com`, then `example.com`, then `com`). Lowercases and strips the trailing
 /// dot first; an empty name never matches.

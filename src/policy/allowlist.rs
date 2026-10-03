@@ -118,7 +118,7 @@ impl Allowlist {
             .filter_map(|line| {
                 let line = line.split('#').next().unwrap_or("").trim();
                 let domain = line.trim_end_matches('.').to_ascii_lowercase();
-                (!domain.is_empty() && domain.contains('.')).then_some(domain)
+                super::is_list_domain(&domain).then_some(domain)
             })
             .collect();
 
@@ -238,6 +238,16 @@ mod tests {
             list.load_from_str("# comment\n\nshop.example.com # trailing comment\nnotadomain\n");
         assert_eq!(count, 1);
         assert!(list.allows("shop.example.com"));
+    }
+
+    /// Should change: entries no query can match are not counted as allowed, the same as the
+    /// blocklist. Should not change: a plain domain still allows everything under it.
+    #[test]
+    fn entries_no_query_can_match_are_not_counted() {
+        let list = Allowlist::new();
+        let count = list.load_from_str("*.shop.example.com\nbücher.de\ncdn.example.com\n");
+        assert_eq!(count, 1);
+        assert!(list.allows("img.cdn.example.com"));
     }
 
     #[test]
