@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use hickory_proto::op::{MessageType, OpCode, ResponseCode};
+use hickory_proto::op::{Edns, MessageType, OpCode, ResponseCode};
 use hickory_proto::rr::rdata::{HINFO, SOA};
 use hickory_proto::rr::{DNSClass, Name as WireName, RData, Record, RecordType as WireRecordType};
 use hickory_server::net::NetError;
@@ -506,12 +506,33 @@ fn blocked_record(name: &WireName, ttl: Duration, record_type: WireRecordType) -
     Some(record)
 }
 
+/// The largest UDP reply sent to a device that says it can take more than 512 bytes: the DNS
+/// Flag Day 2020 recommendation (dnsflagday.net/2020), small enough never to be split into IP
+/// fragments, which some routers drop.
+///
+/// What breaks if you change it: set it higher and some large replies arrive as fragments that
+/// are lost on the way. Leave EDNS out of replies altogether and every answer over 512 bytes is
+/// truncated, sending the device to TCP, where the whole network shares a few connection slots.
+const MAX_UDP_PAYLOAD: u16 = 1232;
+
+/// The EDNS a reply carries when the query had one: the device's own size, within 512 and
+/// [`MAX_UDP_PAYLOAD`] — the same as the library's own server, plus the upper bound.
+fn reply_edns(requested: &Edns) -> Edns {
+    let mut edns = Edns::new();
+    edns.set_max_payload(requested.max_payload().clamp(512, MAX_UDP_PAYLOAD));
+    edns
+}
+
 async fn send<H: ResponseHandler>(
     request: &Request,
     handle: &mut H,
     reply: Reply,
 ) -> Result<ResponseInfo, NetError> {
-    let builder = MessageResponseBuilder::from_message_request(request);
+    let edns = request.edns.as_ref().map(reply_edns);
+    let mut builder = MessageResponseBuilder::from_message_request(request);
+    if let Some(edns) = &edns {
+        builder.edns(edns);
+    }
     let mut metadata = hickory_proto::op::Metadata::response_from_request(&request.metadata);
     metadata.recursion_available = true;
 
@@ -611,6 +632,26 @@ mod tests {
             Response::NotFound {
                 ttl: Duration::from_secs(2),
             }
+        }
+
+        fn admits(&self, _client: IpAddr) -> bool {
+            true
+        }
+    }
+
+    /// A responder whose answer is 40 addresses — about 670 bytes, past the 512 a reply
+    /// without EDNS may use.
+    struct ManyAddresses;
+
+    impl Responder for ManyAddresses {
+        async fn respond(&self, query: &Query, _client: IpAddr) -> Response {
+            let addresses: Vec<IpAddr> =
+                (1..=40u8).map(|n| IpAddr::from([203, 0, 113, n])).collect();
+            Response::Answer(crate::dns::Records::from_addresses(
+                query.name(),
+                Duration::from_secs(60),
+                &addresses,
+            ))
         }
 
         fn admits(&self, _client: IpAddr) -> bool {
@@ -878,7 +919,7 @@ mod tests {
     async fn udp_ask(server: SocketAddr, packet: &[u8]) -> Option<Vec<u8>> {
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.send_to(packet, server).await.unwrap();
-        let mut reply = vec![0u8; 512];
+        let mut reply = vec![0u8; 4096];
         let (len, _) = tokio::time::timeout(Duration::from_secs(1), client.recv_from(&mut reply))
             .await
             .ok()?
@@ -909,6 +950,32 @@ mod tests {
 
         let outside = udp_server(Arc::new(AdmitsNobody)).await;
         assert_eq!(udp_ask(outside, &cut_off).await, None);
+    }
+
+    /// Should change: a device that says it can take a larger reply (EDNS) gets the whole
+    /// answer in one datagram, told the size it may use, rather than a truncated reply that
+    /// sends it over to TCP; a size above 1232 bytes is lowered to 1232.
+    /// Should not change: a query without EDNS still gets a reply within 512 bytes.
+    #[tokio::test]
+    async fn a_large_answer_fits_one_datagram_when_the_device_can_take_it() {
+        let server = udp_server(Arc::new(ManyAddresses)).await;
+        let mut query = Message::query();
+        query.add_query(WireQuery::query(
+            "big.example.com.".parse().unwrap(),
+            WireRecordType::A,
+        ));
+        let plain = udp_ask(server, &query.to_vec().unwrap()).await.unwrap();
+        assert!(plain.len() <= 512);
+        assert!(Message::from_vec(&plain).unwrap().metadata.truncation);
+
+        let mut edns = Edns::new();
+        edns.set_max_payload(4096);
+        query.set_edns(edns);
+        let reply = udp_ask(server, &query.to_vec().unwrap()).await.unwrap();
+        let reply = Message::from_vec(&reply).unwrap();
+        assert!(!reply.metadata.truncation);
+        assert_eq!(reply.answers.len(), 40);
+        assert_eq!(reply.edns.map(|edns| edns.max_payload()), Some(1232));
     }
 
     /// Should change: a message that is itself a response gets no reply, so a forged one cannot
