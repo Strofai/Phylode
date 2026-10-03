@@ -44,6 +44,15 @@ const FLUSH_BATCH: usize = 256;
 /// How often to check whether expired files need deleting.
 const CLEANUP_CHECK_INTERVAL: Duration = Duration::from_secs(600);
 
+/// The most one day's query journal may hold. Ours, with no industry source: a line is about
+/// 100 bytes, so a home's day is a few MB and 200 MB leaves room for dozens of times that.
+/// Past it the day's remaining queries are counted, not written; events are never capped.
+///
+/// What breaks if you change it: with no cap, a device sending from forged addresses can grow
+/// the journal until the disk is full, and the Mac and the network's DNS fail with it. Set it
+/// too low and a busy network loses detail on an ordinary day.
+const MAX_QUERY_BYTES_PER_DAY: u64 = 200 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum WriterError {
     #[error("could not create journal directory {path}: {source}")]
@@ -143,6 +152,18 @@ struct State {
     reported_dropped: u64,
     /// Records that reached this thread but could not be written, not yet in an event.
     unwritten: u64,
+    /// Queries left out because the day's file was full, not yet in an event.
+    over_limit: u64,
+}
+
+/// What became of one line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Written {
+    Yes,
+    /// The file could not be opened or written.
+    Failed,
+    /// The day's file has reached its size limit.
+    OverLimit,
 }
 
 /// A writer that rolls over to a new file each day.
@@ -152,25 +173,33 @@ struct DayFile {
     writer: Option<BufWriter<File>>,
     /// When a failed open may be tried again.
     retry_at: Option<Instant>,
+    /// The most the day's file may hold; `None` means no limit.
+    max_bytes: Option<u64>,
+    /// What the day's file holds, counting what it held before this process opened it.
+    bytes: u64,
 }
 
 impl DayFile {
-    fn new(path_for: fn(&Path, &str) -> PathBuf) -> Self {
+    fn new(path_for: fn(&Path, &str) -> PathBuf, max_bytes: Option<u64>) -> Self {
         Self {
             path_for,
             open_date: None,
             writer: None,
             retry_at: None,
+            max_bytes,
+            bytes: 0,
         }
     }
 
     /// Appends one line to the day's file. A file that would not open is tried again at most
-    /// once per [`FLUSH_INTERVAL`].
+    /// once per [`FLUSH_INTERVAL`]; a line that would take the file past `max_bytes` is not
+    /// written.
     ///
     /// What breaks if you change it: without the retry, one failed open (a full disk for a
     /// moment) loses the rest of that day's records; retrying on every record instead costs a
-    /// failing system call per query while the disk stays full.
-    fn write(&mut self, directory: &Path, date: &str, line: &str) -> bool {
+    /// failing system call per query while the disk stays full. Starting `bytes` at zero
+    /// instead of the file's size lets each restart write another full day's worth.
+    fn write(&mut self, directory: &Path, date: &str, line: &str) -> Written {
         if self.open_date.as_deref() != Some(date) {
             self.flush();
             self.writer = None;
@@ -183,13 +212,26 @@ impl DayFile {
                 .writer
                 .is_none()
                 .then(|| Instant::now() + FLUSH_INTERVAL);
+            self.bytes = self
+                .writer
+                .as_ref()
+                .and_then(|writer| writer.get_ref().metadata().ok())
+                .map_or(0, |metadata| metadata.len());
         }
         let Some(writer) = self.writer.as_mut() else {
-            return false;
+            return Written::Failed;
         };
+        let len = line.len() as u64;
+        if self.max_bytes.is_some_and(|max| self.bytes + len > max) {
+            return Written::OverLimit;
+        }
         // Give up on a record that fails to write. Being unable to journal must not stop the
         // service.
-        writer.write_all(line.as_bytes()).is_ok()
+        if writer.write_all(line.as_bytes()).is_err() {
+            return Written::Failed;
+        }
+        self.bytes += len;
+        Written::Yes
     }
 
     fn flush(&mut self) {
@@ -204,30 +246,33 @@ impl State {
         Self {
             directory,
             zone,
-            queries: DayFile::new(queries_file),
-            events: DayFile::new(events_file),
+            queries: DayFile::new(queries_file, Some(MAX_QUERY_BYTES_PER_DAY)),
+            events: DayFile::new(events_file, None),
             pending: 0,
             last_flush: Instant::now(),
             dropped,
             reported_dropped: 0,
             unwritten: 0,
+            over_limit: 0,
         }
     }
 
     fn push(&mut self, entry: &Entry) {
-        if !self.write(entry) {
-            self.unwritten += 1;
+        match self.write(entry) {
+            Written::Yes => {}
+            Written::Failed => self.unwritten += 1,
+            Written::OverLimit => self.over_limit += 1,
         }
     }
 
-    /// Writes one entry and says whether it was written.
-    fn write(&mut self, entry: &Entry) -> bool {
+    /// Writes one entry and says what became of it.
+    fn write(&mut self, entry: &Entry) -> Written {
         let (at, line, is_event) = match entry {
             Entry::Query(record) => (record.at, format_line(record, &self.zone), false),
             Entry::Event(event) => (event.at, format_event(event, &self.zone), true),
             // The main loop intercepts this first, so it never reaches here; if it did, it
             // would simply write no line.
-            Entry::Flush(_) => return true,
+            Entry::Flush(_) => return Written::Yes,
         };
         let date = Civil::from_unix(unix_seconds(at), &self.zone).date_string();
 
@@ -236,7 +281,7 @@ impl State {
         } else {
             self.queries.write(&self.directory, &date, &line)
         };
-        if written {
+        if written == Written::Yes {
             self.pending += 1;
         }
         written
@@ -265,10 +310,11 @@ impl State {
     }
 
     /// Writes a "records dropped" event for records lost since the last one: those the answer
-    /// path could not queue, and those that could not be written. Written here rather than
-    /// sent through the channel, because a full channel is one reason they were lost. A count
-    /// is cleared only once its event is written, so a journal that cannot be written reports
-    /// the loss when it can.
+    /// path could not queue, those that could not be written, and queries past the day's size
+    /// limit. Written here rather than sent through the channel, because a full channel is one
+    /// reason they were lost. A count is cleared only once its event is written, so a journal
+    /// that cannot be written reports the loss when it can. At most one event per reason per
+    /// flush, so a flood adds a few lines a minute, not one per query.
     ///
     /// What breaks if you change it: item 7 of the weekly summary reads only these events; the
     /// counters on their own are never seen by anyone.
@@ -283,6 +329,11 @@ impl State {
         {
             self.unwritten = 0;
         }
+        if self.over_limit > 0
+            && self.write_dropped(self.over_limit, "the day's journal reached its size limit")
+        {
+            self.over_limit = 0;
+        }
     }
 
     fn write_dropped(&mut self, count: u64, reason: &str) -> bool {
@@ -290,7 +341,7 @@ impl State {
             at: SystemTime::now(),
             kind: EventKind::RecordsDropped,
             detail: format!("{count} not written; {reason}"),
-        }))
+        })) == Written::Yes
     }
 }
 
@@ -488,6 +539,70 @@ mod tests {
             ),
             "{text}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: once a day's query journal reaches its size limit, further queries that
+    /// day are counted rather than written, and an event says how many — so a flood cannot
+    /// fill the disk, and the weekly summary does not call the day complete.
+    /// Should not change: events are still written past the limit.
+    #[test]
+    fn a_full_day_of_queries_stops_growing_and_says_how_many_it_left_out() {
+        let dir = scratch_dir("day-limit");
+        let mut state = State::new(
+            dir.clone(),
+            LocalZone::fixed_hours(8),
+            Arc::new(AtomicU64::new(0)),
+        );
+        state.queries.max_bytes = Some(300);
+        for n in 0..20 {
+            state.push(&Entry::Query(super::super::Record {
+                at: SystemTime::now(),
+                client: "192.168.1.20".parse().unwrap(),
+                name: format!("q{n}.example.com"),
+                record_type: "A".into(),
+                disposition: super::super::Disposition::Allowed,
+                reason: "".into(),
+            }));
+        }
+        state.flush();
+
+        let mut queries = 0;
+        let mut events = String::new();
+        for name in file_names(&dir) {
+            let text = std::fs::read_to_string(dir.join(&name)).unwrap();
+            if name.starts_with(EVENTS_PREFIX) {
+                events += &text;
+            } else {
+                assert!(text.len() <= 300, "{} bytes", text.len());
+                queries = text.lines().count();
+            }
+        }
+        assert!(queries > 0 && queries < 20, "{queries} written");
+        assert!(
+            events.contains(&format!(
+                "\trecords-dropped\t{} not written; the day's journal reached its size limit",
+                20 - queries
+            )),
+            "{events}"
+        );
+
+        // A restart picks up the day's file at the size it already has.
+        let mut restarted = State::new(
+            dir.clone(),
+            LocalZone::fixed_hours(8),
+            Arc::new(AtomicU64::new(0)),
+        );
+        restarted.queries.max_bytes = Some(300);
+        restarted.push(&Entry::Query(super::super::Record {
+            at: SystemTime::now(),
+            client: "192.168.1.20".parse().unwrap(),
+            name: "after-restart.example.com".to_string(),
+            record_type: "A".into(),
+            disposition: super::super::Disposition::Allowed,
+            reason: "".into(),
+        }));
+        assert_eq!(restarted.over_limit, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
