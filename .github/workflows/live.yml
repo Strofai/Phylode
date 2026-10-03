@@ -1,0 +1,69 @@
+name: Live checks
+
+# Runs a release build on a throwaway macOS runner and drives it the way a busy network would,
+# for behaviour one Mac cannot produce on its own: here, thousands of devices at once. Each
+# source address is an alias on the runner's loopback interface, which only a disposable
+# machine should get.
+
+on:
+  push:
+    paths: ["src/policy/ratelimit.rs", "tests/live_rate_limit.rs", ".github/workflows/live.yml"]
+  pull_request:
+    paths: ["src/policy/ratelimit.rs", "tests/live_rate_limit.rs", ".github/workflows/live.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rate-limit:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo build --release
+      - run: cargo test --release --test live_rate_limit --no-run
+
+      # Must match the addresses in tests/live_rate_limit.rs.
+      - name: Give the runner 5003 source addresses
+        run: |
+          sudo ifconfig lo0 alias 10.99.255.1/32
+          sudo ifconfig lo0 alias 10.99.255.250/32
+          sudo ifconfig lo0 alias 10.99.255.251/32
+          for n in $(seq 0 4999); do
+            sudo ifconfig lo0 alias "10.99.$(( n / 250 )).$(( n % 250 + 1 ))/32"
+          done
+          echo "addresses on lo0: $(ifconfig lo0 | grep -c 'inet 10\.99\.')"
+
+      - name: Write a scratch configuration
+        run: |
+          dir="$RUNNER_TEMP/live"
+          mkdir -p "$dir"
+          printf 'ads.example.test\n' > "$dir/list.txt"
+          printf 'listen = 0.0.0.0:15353\nupstream = tls 1.1.1.1 cloudflare-dns.com\nblocklist = %s/list.txt\njournal_dir = %s/journal\n' \
+            "$dir" "$dir" > "$dir/phylode.conf"
+          echo "LIVE_DIR=$dir" >> "$GITHUB_ENV"
+
+      - name: A device over its limit stays limited while new sources fill the table
+        run: |
+          ./target/release/phylode --config "$LIVE_DIR/phylode.conf" > "$LIVE_DIR/serve.log" 2>&1 &
+          pid=$!
+          sleep 3
+          status=0
+          cargo test --release --test live_rate_limit -- --ignored --nocapture || status=$?
+          kill "$pid"
+          exit "$status"
+
+      - name: Service logs
+        if: always()
+        run: |
+          tail -40 "$LIVE_DIR/serve.log" || true
+          cat "$LIVE_DIR"/journal/events-*.tsv 2>/dev/null | tail -20 || true
