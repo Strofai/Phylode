@@ -16,7 +16,7 @@
 ///
 /// Sources: RFC 6303 (private-address reverse lookups), RFC 7793 (100.64/10), RFC 6761 (localhost, invalid, test),
 /// RFC 6762 (local; and home, lan, corp from appendix G), RFC 8375 (home.arpa), RFC 7686
-/// (onion), RFC 9476 (alt), and
+/// (onion), RFC 9476 (alt), RFC 9462 (resolver.arpa), and
 /// `internal`, which ICANN reserved for private networks.
 const LOCAL_ZONES: &[&str] = &[
     "local",
@@ -30,6 +30,9 @@ const LOCAL_ZONES: &[&str] = &[
     "corp",
     "onion",
     "alt",
+    // Asked by devices looking for an encrypted resolver to switch to (DDR). RFC 9462 §6.1:
+    // a forwarder should not pass these on, or the device is offered the upstream's.
+    "resolver.arpa",
     // IPv4 reverse: 10/8, 127/8, 169.254/16, 192.168/16, 0/8, test networks, broadcast
     "10.in-addr.arpa",
     "127.in-addr.arpa",
@@ -111,6 +114,7 @@ mod tests {
             "HOME.ARPA.",
             "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
             "wallet.alt",
+            "_dns.resolver.arpa",
         ] {
             assert!(
                 is_local(name),
