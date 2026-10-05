@@ -11,7 +11,7 @@ use std::io::{BufWriter, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -80,13 +80,15 @@ pub enum WriterError {
 /// permissions or the path are wrong, and that has to be visible at startup.
 ///
 /// `dropped` is the count the answer path keeps of records it could not queue; the writer
-/// turns any increase into a "records dropped" event.
+/// turns any increase into a "records dropped" event. `queued` counts query records waiting
+/// in the channel; the writer takes one off for each it receives.
 pub fn spawn(
     receiver: Receiver<Entry>,
     directory: PathBuf,
     retention_days: u32,
     zone: LocalZone,
     dropped: Arc<AtomicU64>,
+    queued: Arc<AtomicUsize>,
 ) -> Result<(), WriterError> {
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -103,7 +105,7 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name("phylode-journal".to_string())
-        .spawn(move || run(receiver, directory, retention_days, zone, dropped))
+        .spawn(move || run(receiver, directory, retention_days, zone, dropped, queued))
         .map(|_| ())
         .map_err(|source| WriterError::SpawnThread { source })
 }
@@ -130,6 +132,7 @@ fn run(
     retention_days: u32,
     zone: LocalZone,
     dropped: Arc<AtomicU64>,
+    queued: Arc<AtomicUsize>,
 ) {
     let mut state = State::new(directory, zone.clone(), dropped);
     let mut cleaner = Cleaner::new(retention_days, zone);
@@ -143,6 +146,9 @@ fn run(
                 let _ = done.send(());
             }
             Ok(entry) => {
+                if matches!(entry, Entry::Query(_)) {
+                    queued.fetch_sub(1, Ordering::Relaxed);
+                }
                 state.push(&entry);
                 if state.flush_due() {
                     state.flush();

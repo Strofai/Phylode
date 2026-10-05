@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, SystemTime};
 
@@ -26,6 +26,11 @@ pub use writer::{FLUSH_INTERVAL, WriterError};
 /// Channel capacity. What breaks if you change it: this is the buffer that absorbs a busy
 /// disk. Larger costs memory; smaller drops more records at peak.
 const CHANNEL_CAPACITY: usize = 4096;
+
+/// Places in the channel query records may never take, kept for service events and flushes.
+/// What breaks if you change it: with none, a flood of queries fills the channel and the event
+/// saying why the service restarted, or that every upstream failed, is the one dropped.
+const EVENT_RESERVE: usize = 256;
 
 /// How a query was ultimately handled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,6 +279,8 @@ pub enum Entry {
 pub struct Journal {
     sender: SyncSender<Entry>,
     dropped: Arc<AtomicU64>,
+    /// Query records in the channel, so they can be kept out of the events' reserve.
+    queued: Arc<AtomicUsize>,
 }
 
 impl Journal {
@@ -287,14 +294,20 @@ impl Journal {
     ) -> Result<Self, WriterError> {
         let (sender, receiver) = sync_channel(CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
+        let queued = Arc::new(AtomicUsize::new(0));
         writer::spawn(
             receiver,
             directory,
             retention_days,
             zone,
             Arc::clone(&dropped),
+            Arc::clone(&queued),
         )?;
-        Ok(Self { sender, dropped })
+        Ok(Self {
+            sender,
+            dropped,
+            queued,
+        })
     }
 
     /// Records something that happened to the service itself. Shares the channel with query
@@ -310,16 +323,25 @@ impl Journal {
     /// Drops a record into the channel. **This function never touches the disk and never
     /// blocks.**
     pub fn record(&self, record: Record) {
-        self.send(Entry::Query(record));
+        if self.queued.fetch_add(1, Ordering::Relaxed) >= CHANNEL_CAPACITY - EVENT_RESERVE {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if !self.send(Entry::Query(record)) {
+            self.queued.fetch_sub(1, Ordering::Relaxed);
+        }
     }
 
-    fn send(&self, entry: Entry) {
+    /// Whether the entry went into the channel.
+    fn send(&self, entry: Entry) -> bool {
         match self.sender.try_send(entry) {
-            Ok(()) => {}
+            Ok(()) => true,
             // The channel is full, or the writer thread is gone. Drop this one and count
             // it — stalling queries would be the worse outcome.
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
+                false
             }
         }
     }
@@ -520,6 +542,7 @@ mod tests {
         let orphan = Journal {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
+            queued: Arc::new(AtomicUsize::new(0)),
         };
         assert!(!orphan.flush_blocking(Duration::from_millis(100)));
     }
@@ -573,11 +596,54 @@ mod tests {
         let journal = Journal {
             sender,
             dropped: Arc::new(AtomicU64::new(0)),
+            queued: Arc::new(AtomicUsize::new(0)),
         };
         journal.record(record("a.example.com", Disposition::Allowed));
         journal.record(record("b.example.com", Disposition::Allowed));
         journal.record(record("c.example.com", Disposition::Allowed));
         assert_eq!(journal.dropped(), 2, "anything over capacity is counted");
         drop(receiver);
+    }
+
+    /// Should not change: query records the writer has taken stop counting against their
+    /// share, or a long-running service would end up dropping every query.
+    #[test]
+    fn written_queries_give_their_place_back() {
+        let dir = std::env::temp_dir().join(format!("phylode-queued-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let journal = Journal::start(dir.clone(), 10, LocalZone::utc()).unwrap();
+        for _ in 0..10 {
+            journal.record(record("a.example.com", Disposition::Allowed));
+        }
+        assert!(journal.flush_blocking(Duration::from_secs(5)));
+        assert_eq!(journal.queued.load(Ordering::Relaxed), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: once query records have taken their share of the channel, further ones
+    /// are dropped and counted while service events still get in.
+    /// Should not change: queries below their share are queued as before.
+    #[test]
+    fn a_query_flood_leaves_room_for_service_events() {
+        let (sender, receiver) = sync_channel(CHANNEL_CAPACITY);
+        let journal = Journal {
+            sender,
+            dropped: Arc::new(AtomicU64::new(0)),
+            queued: Arc::new(AtomicUsize::new(0)),
+        };
+        for _ in 0..CHANNEL_CAPACITY {
+            journal.record(record("a.example.com", Disposition::Allowed));
+        }
+        assert_eq!(journal.dropped(), EVENT_RESERVE as u64);
+        journal.event(EventKind::Unresponsive, "no response");
+        assert_eq!(
+            journal.dropped(),
+            EVENT_RESERVE as u64,
+            "the event was not dropped"
+        );
+
+        let entries: Vec<Entry> = receiver.try_iter().collect();
+        assert_eq!(entries.len(), CHANNEL_CAPACITY - EVENT_RESERVE + 1);
+        assert!(matches!(entries.last(), Some(Entry::Event(_))));
     }
 }
