@@ -22,6 +22,7 @@ use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
 use phylode::install;
 use phylode::journal::{self, EventKind, Journal, LocalZone};
+use phylode::log_line;
 use phylode::policy::{Allowlist, Blocklist, RebindGuard, ServedNetworks};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
@@ -53,7 +54,7 @@ fn main() -> ExitCode {
     match Command::parse(&args) {
         Ok(command) => command.run(),
         Err(message) => {
-            eprintln!("{message}");
+            log_line!("{message}");
             ExitCode::from(2)
         }
     }
@@ -206,7 +207,7 @@ fn finish(result: Result<(), install::InstallError>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("Did not finish: {error}");
+            log_line!("Did not finish: {error}");
             ExitCode::FAILURE
         }
     }
@@ -224,7 +225,7 @@ fn edit(config_path: &Path, domain: &str, action: EditFn) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!("{error}");
+            log_line!("{error}");
             ExitCode::from(2)
         }
     }
@@ -480,7 +481,7 @@ fn diagnostics(config_path: &Path) -> ExitCode {
 /// back to UTC, with a warning, when the system zone cannot be read.
 fn local_zone() -> LocalZone {
     LocalZone::system().unwrap_or_else(|error| {
-        eprintln!(
+        log_line!(
             "Warning: could not read this Mac's time zone, so journal dates are in UTC: {error}"
         );
         LocalZone::utc()
@@ -491,7 +492,7 @@ fn load_config(path: &Path) -> Option<Config> {
     match Config::load(path) {
         Ok(config) => Some(config),
         Err(error) => {
-            eprintln!(
+            log_line!(
                 "Could not use the configuration file {}: {error}",
                 path.display()
             );
@@ -511,7 +512,7 @@ fn serve(config_path: &Path) -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(error) => {
-            eprintln!("Could not build the async runtime: {error}");
+            log_line!("Could not build the async runtime: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -519,7 +520,7 @@ fn serve(config_path: &Path) -> ExitCode {
     match runtime.block_on(run(config)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            eprintln!("{message}");
+            log_line!("{message}");
             ExitCode::FAILURE
         }
     }
@@ -537,13 +538,13 @@ async fn run(config: Config) -> Result<(), String> {
     let listener = match Listener::from_launchd() {
         Ok(listener) => {
             let (udp, tcp) = listener.counts();
-            eprintln!(
+            log_line!(
                 "Adopted launchd's sockets: {udp} UDP, {tcp} TCP (this process is unprivileged)"
             );
             listener
         }
         Err(reason) => {
-            eprintln!(
+            log_line!(
                 "Not started by launchd ({reason}); binding {:?} directly",
                 config.listen()
             );
@@ -564,20 +565,20 @@ async fn run(config: Config) -> Result<(), String> {
     ) {
         Ok(journal) => Some(journal),
         Err(error) => {
-            eprintln!(
+            log_line!(
                 "Warning: the query journal could not be opened; this run will not be journalled: {error}"
             );
             None
         }
     };
 
-    eprintln!(
+    log_line!(
         "Phylode serving on {:?}; {} (all encrypted, no downgrade), cache limit {}",
         config.listen(),
         plural(conductor.len(), "upstream", "upstreams"),
         config.cache_capacity()
     );
-    eprintln!(
+    log_line!(
         "Journalling to {}, kept {} days",
         config.journal_dir().display(),
         config.journal_retention_days()
@@ -611,7 +612,7 @@ async fn run(config: Config) -> Result<(), String> {
                 "at least one upstream recovered",
             )
         };
-        eprintln!("{detail}");
+        log_line!("{detail}");
         if let Some(journal) = upstream_journal.as_ref() {
             journal.event(kind, detail);
         }
@@ -622,10 +623,10 @@ async fn run(config: Config) -> Result<(), String> {
     // the process exists; it does nothing when the process is stuck but still alive.
     match listener.probe_target() {
         Some(target) => {
-            eprintln!("Self health check running; test queries go to {target}");
+            log_line!("Self health check running; test queries go to {target}");
             health::spawn(target, journal.clone());
         }
-        None => eprintln!(
+        None => log_line!(
             "Warning: no UDP listener, so this run has no self health check — \
              a hang that does not exit will go unnoticed"
         ),
@@ -687,7 +688,7 @@ fn spawn_shutdown(journal: Option<Journal>) {
         let Some(reason) = wait_for_stop_signal().await else {
             return;
         };
-        eprintln!("Received {reason}; flushing the journal before exiting");
+        log_line!("Received {reason}; flushing the journal before exiting");
         if let Some(journal) = journal {
             journal.event(EventKind::Stopped, format!("received {reason}"));
             let flushed =
@@ -695,7 +696,7 @@ fn spawn_shutdown(journal: Option<Journal>) {
                     .await
                     .unwrap_or(false);
             if !flushed {
-                eprintln!(
+                log_line!(
                     "Warning: the journal did not finish writing within {} seconds; the last few \
                      records may be lost",
                     SHUTDOWN_FLUSH_TIMEOUT.as_secs()
@@ -714,7 +715,7 @@ async fn wait_for_stop_signal() -> Option<&'static str> {
     let mut terminate = match signal(SignalKind::terminate()) {
         Ok(stream) => stream,
         Err(error) => {
-            eprintln!(
+            log_line!(
                 "Warning: could not install the stop signal handler; the last few records may be \
                  lost on shutdown: {error}"
             );
@@ -747,13 +748,13 @@ fn spawn_archiver(config: Config, zone: LocalZone) {
                     .await;
             match result {
                 Ok(Ok(Some(path))) => {
-                    eprintln!("Archived last week's summary: {}", path.display());
+                    log_line!("Archived last week's summary: {}", path.display());
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
-                    eprintln!("Warning: could not archive last week's summary: {error}");
+                    log_line!("Warning: could not archive last week's summary: {error}");
                 }
-                Err(error) => eprintln!("Warning: the archiving task was interrupted: {error}"),
+                Err(error) => log_line!("Warning: the archiving task was interrupted: {error}"),
             }
             tokio::time::sleep(ARCHIVE_CHECK_INTERVAL).await;
         }
@@ -813,7 +814,7 @@ async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Optio
 
     let _ = tokio::task::spawn_blocking(move || match blocklist.load_all(&required, &optional) {
         Ok(count) => {
-            eprintln!(
+            log_line!(
                 "{}: {}",
                 install::BLOCKLIST_LOADED,
                 plural(count, "domain", "domains")
@@ -831,7 +832,7 @@ async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Optio
         // that did not happen.
         Err(error) => match blocklist.loaded_len() {
             Some(loaded) => {
-                eprintln!(
+                log_line!(
                     "Not every blocklist could be used: {error}. Still blocking with the lists \
                      already loaded ({}).",
                     plural(loaded, "domain", "domains")
@@ -841,7 +842,7 @@ async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Optio
                 }
             }
             None => {
-                eprintln!("Blocklist failed to load; allowing everything for now: {error}");
+                log_line!("Blocklist failed to load; allowing everything for now: {error}");
                 if let Some(journal) = journal.as_ref() {
                     journal.event(EventKind::BlocklistFailed, error.to_string());
                 }
@@ -857,7 +858,7 @@ async fn reload_allowlist(allowlist: &Allowlist, path: &Path, journal: Option<&J
     let journal = journal.cloned();
 
     let _ = tokio::task::spawn_blocking(move || match allowlist.load_from_file(&path) {
-        Ok(count) => eprintln!(
+        Ok(count) => log_line!(
             "Allowlist loaded: {} (plus {} hardcoded Apple rules)",
             plural(count, "entry", "entries"),
             Allowlist::hard_rules().len()
@@ -865,7 +866,7 @@ async fn reload_allowlist(allowlist: &Allowlist, path: &Path, journal: Option<&J
         Err(error) => {
             // A failed read leaves the entries already loaded in place; at start-up there are
             // none yet.
-            eprintln!(
+            log_line!(
                 "Warning: the allowlist could not be read, so the entries loaded before stay in \
                  effect (none if the service just started) alongside the hardcoded Apple rules: \
                  {error}"

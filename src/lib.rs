@@ -14,6 +14,20 @@
 // holding.
 #![deny(unsafe_code)]
 
+/// Writes one line to the service log (standard error), carrying on if it cannot be written.
+/// Use it instead of `eprintln!` everywhere in this program.
+///
+/// What breaks if you change it: `eprintln!` panics when the write fails, as it does on a full
+/// disk, and a panic ends the background task it happened in — list reloading or the self
+/// health check would stop with nothing to show for it.
+#[macro_export]
+macro_rules! log_line {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($arg)*);
+    }};
+}
+
 pub mod cache;
 pub mod cli;
 pub mod config;

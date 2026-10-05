@@ -115,7 +115,7 @@ async fn watch(target: SocketAddr, interval: Duration, timeout: Duration) -> Str
                 // exactly the class of failure this feature exists to catch.
                 if !ever_succeeded {
                     ever_succeeded = true;
-                    eprintln!(
+                    log_line!(
                         "Self health check: first probe succeeded; probing every {} seconds from \
                          here (reported once)",
                         interval.as_secs()
@@ -126,7 +126,7 @@ async fn watch(target: SocketAddr, interval: Duration, timeout: Duration) -> Str
             }
             Err(error) => {
                 consecutive_failures += 1;
-                eprintln!(
+                log_line!(
                     "Self health check: no response {consecutive_failures} time(s) in a row \
                      (restarting after {RESTART_AFTER_FAILURES}): {error}"
                 );
@@ -159,7 +159,7 @@ fn record_unresponsive(journal: Option<&Journal>, reason: &str) {
         "no response to {RESTART_AFTER_FAILURES} consecutive probes ({reason}); exiting so the \
          system restarts the service"
     );
-    eprintln!("{detail}");
+    log_line!("{detail}");
     if let Some(journal) = journal {
         journal.event(EventKind::Unresponsive, detail);
     }

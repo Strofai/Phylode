@@ -1,0 +1,5 @@
+# eprintln! panics when standard error cannot be written (a full disk), ending whichever
+# background task it ran in; log_line! carries on instead.
+disallowed-macros = [
+  { path = "std::eprintln", reason = "panics on a failed write; use phylode::log_line!" },
+]
