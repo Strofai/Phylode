@@ -63,6 +63,14 @@ const TCP_RESPONSE_BUFFER: usize = 4;
 /// closed immediately and the device retries.
 const MAX_TCP_CONNECTIONS: usize = 10;
 
+/// Maximum UDP queries being handled at once, across every UDP socket; what arrives past it is
+/// dropped. Ours: a few hundred devices each in the middle of a page load stay well below it.
+///
+/// What breaks if you change it: without a cap, each datagram that parses becomes a task
+/// before the served-network and rate-limit checks run, so a flood grows memory with no
+/// bound. Too low and an ordinary burst gets dropped; devices retry after about a second.
+const MAX_UDP_IN_PROGRESS: usize = 1024;
+
 /// Maximum concurrent TCP connections from one source address. The 3 is ours, with no industry
 /// source: it lets the pool of 10 serve at least three devices.
 ///
@@ -186,9 +194,14 @@ pub async fn serve<R: Responder>(listener: Listener, responder: Arc<R>) -> Resul
     for tcp in listener.tcp {
         tokio::spawn(serve_tcp(tcp, Arc::clone(&handler), Arc::clone(&slots)));
     }
+    let udp_slots = Arc::new(Semaphore::new(MAX_UDP_IN_PROGRESS));
     let mut udp = JoinSet::new();
     for socket in listener.udp {
-        udp.spawn(serve_udp(socket, Arc::clone(&handler)));
+        udp.spawn(serve_udp(
+            socket,
+            Arc::clone(&handler),
+            Arc::clone(&udp_slots),
+        ));
     }
     match udp.join_next().await {
         Some(Ok(stopped)) => stopped,
@@ -206,6 +219,7 @@ pub async fn serve<R: Responder>(listener: Listener, responder: Arc<R>) -> Resul
 async fn serve_udp<R: Responder>(
     socket: UdpSocket,
     handler: Arc<Handler<R>>,
+    slots: Arc<Semaphore>,
 ) -> Result<(), NetError> {
     // Replies go to each datagram's own source; this address is never used.
     let unused = SocketAddr::from(([127, 255, 255, 254], 0));
@@ -231,15 +245,35 @@ async fn serve_udp<R: Responder>(
         let Ok(request) = Request::from_bytes(bytes, from, Protocol::Udp) else {
             continue;
         };
+        let Some(slot) = udp_slot(&slots, from.ip()) else {
+            continue;
+        };
         let reply_to = ResponseHandle::new(from, sender.with_remote_addr(from), Protocol::Udp);
         let handler = Arc::clone(&handler);
         tokio::spawn(async move {
             handler
                 .handle_request::<_, TokioTime>(&request, reply_to)
                 .await;
+            drop(slot);
         });
     }
     Err(NetError::from("the UDP socket closed"))
+}
+
+/// Whether a datagram from `source` gets handled: `Some` with the slot it holds until the
+/// handling ends, or `None` to drop it because every slot is taken. Loopback is handled
+/// without a slot.
+///
+/// What breaks if you change it: the self health check arrives over loopback and must never
+/// be the one dropped, or a flood makes a working service restart itself. macOS discards
+/// loopback sources arriving on any other interface (XNU `ip_input`, `ip6_input`), so they
+/// cannot be forged from the network.
+fn udp_slot(slots: &Arc<Semaphore>, source: IpAddr) -> Option<Option<OwnedSemaphorePermit>> {
+    match Arc::clone(slots).try_acquire_owned() {
+        Ok(permit) => Some(Some(permit)),
+        Err(_) if source.to_canonical().is_loopback() => Some(None),
+        Err(_) => None,
+    }
 }
 
 /// The accept loop for one TCP listener. It does what the library's own loop does, plus
@@ -926,6 +960,28 @@ mod tests {
             .ok()?;
         reply.truncate(len);
         Some(reply)
+    }
+
+    /// Should change: with every slot taken, a datagram from the network is dropped, and a
+    /// slot given back makes room again.
+    /// Should not change: loopback (the self health check) is handled even when full.
+    #[test]
+    fn udp_drops_past_the_cap_except_loopback() {
+        let slots = Arc::new(Semaphore::new(1));
+        let device: IpAddr = "192.168.0.20".parse().unwrap();
+        let held = udp_slot(&slots, device).expect("one slot is free");
+        assert!(held.is_some());
+
+        assert!(udp_slot(&slots, device).is_none(), "full: dropped");
+        for loopback in ["127.0.0.1", "::1", "::ffff:127.0.0.1"] {
+            assert!(
+                matches!(udp_slot(&slots, loopback.parse().unwrap()), Some(None)),
+                "{loopback}"
+            );
+        }
+
+        drop(held);
+        assert!(matches!(udp_slot(&slots, device), Some(Some(_))));
     }
 
     /// Should change: a datagram whose header reads but whose question does not gets no reply,
