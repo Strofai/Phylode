@@ -26,6 +26,18 @@ downloads both every day at 04:17 and switches to a new copy only after checking
 complete, keeping the previous one. The lists aren't part of this repository; HaGeZi
 publishes them under GPL-3.0.
 
+To block less or more, change `protection` in `/usr/local/etc/phylode.conf`, then run
+`sudo phylode install` again:
+
+| Setting | First list | Suits |
+|---|---|---|
+| `relaxed` | Multi NORMAL | Networks where nobody will unblock a site |
+| `standard` (default) | Multi PRO | Most networks |
+| `strict` | Multi PRO++ | Networks where someone will run `phylode allow` to fix the odd wrong block |
+
+Every level uses the same threat intelligence feed. HaGeZi's strictest tier, Ultimate,
+isn't offered: HaGeZi says it stops some apps working.
+
 Some services are never blocked, whatever a list says: `captive.apple.com`, which Apple
 devices use to find Wi-Fi sign-in pages, and Apple's push notification and Private Relay
 services.

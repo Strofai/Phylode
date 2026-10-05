@@ -79,6 +79,54 @@ pub enum UpstreamProtocol {
     Https,
 }
 
+/// How much the daily lists block: one of HaGeZi's tiers, each with the Threat Intelligence
+/// Feeds on top. The list updater reads this setting and downloads the matching tier; the
+/// service only reports it.
+///
+/// What breaks if you change it: the names must match what `deploy/update-blocklists.sh`
+/// recognizes, or the updater falls back to `standard` while `status` says otherwise. There is
+/// deliberately no tier above `strict`: HaGeZi warns that Ultimate stops apps working, and
+/// keeping the network usable comes first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Protection {
+    /// HaGeZi Multi NORMAL: for a network where nobody will unblock a site.
+    Relaxed,
+    /// HaGeZi Multi PRO, the tier HaGeZi recommends.
+    #[default]
+    Standard,
+    /// HaGeZi Multi PRO++: blocks more, occasionally a site someone needs.
+    Strict,
+}
+
+impl Protection {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "relaxed" => Some(Self::Relaxed),
+            "standard" => Some(Self::Standard),
+            "strict" => Some(Self::Strict),
+            _ => None,
+        }
+    }
+
+    /// The word written in the configuration file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Relaxed => "relaxed",
+            Self::Standard => "standard",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// The lists this tier downloads, as their maintainer names them.
+    pub fn lists(self) -> &'static str {
+        match self {
+            Self::Relaxed => "HaGeZi Multi NORMAL plus Threat Intelligence Feeds",
+            Self::Standard => "HaGeZi Multi PRO plus Threat Intelligence Feeds",
+            Self::Strict => "HaGeZi Multi PRO++ plus Threat Intelligence Feeds",
+        }
+    }
+}
+
 /// One upstream resolver. The address is always an IP; the hostname is only used to validate
 /// the certificate.
 ///
@@ -195,9 +243,15 @@ pub struct Config {
     stale_max_age: Duration,
     internal_domains: Vec<String>,
     served_networks: Vec<IpNetwork>,
+    protection: Protection,
 }
 
 impl Config {
+    /// Which tier of lists the updater downloads; see [`Protection`].
+    pub fn protection(&self) -> Protection {
+        self.protection
+    }
+
     pub fn listen(&self) -> &[SocketAddr] {
         &self.listen
     }
@@ -276,6 +330,7 @@ impl Config {
         let mut stale_max_age = DEFAULT_STALE_MAX_AGE;
         let mut internal_domains = Vec::new();
         let mut served_networks = Vec::new();
+        let mut protection = Protection::default();
 
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
@@ -327,6 +382,7 @@ impl Config {
                     }
                     served_networks.push(network);
                 }
+                "protection" => protection = Protection::parse(value).ok_or_else(bad)?,
                 _ => {
                     return Err(ConfigError::UnknownKey { line });
                 }
@@ -359,6 +415,7 @@ impl Config {
             stale_max_age,
             internal_domains,
             served_networks,
+            protection,
         })
     }
 }
@@ -390,6 +447,33 @@ mod tests {
         assert_eq!(config.block_ttl(), DEFAULT_BLOCK_TTL);
         assert_eq!(config.stale_max_age(), DEFAULT_STALE_MAX_AGE);
         assert_eq!(config.journal_retention_days(), 10);
+    }
+
+    /// Should change: each of the three tiers is read from `protection`.
+    /// Should not change: without the line it is `standard`, today's lists, and any other word
+    /// is refused rather than quietly read as a tier.
+    #[test]
+    fn protection_is_one_of_three_tiers() {
+        assert_eq!(
+            Config::parse(MINIMAL).unwrap().protection(),
+            Protection::Standard
+        );
+        for (word, tier) in [
+            ("relaxed", Protection::Relaxed),
+            ("standard", Protection::Standard),
+            ("strict", Protection::Strict),
+        ] {
+            let text = format!("{MINIMAL}\nprotection = {word}");
+            assert_eq!(Config::parse(&text).unwrap().protection(), tier);
+            assert_eq!(tier.name(), word);
+        }
+        for word in ["ultimate", "Strict", ""] {
+            let text = format!("{MINIMAL}\nprotection = {word}");
+            assert!(
+                matches!(Config::parse(&text), Err(ConfigError::BadValue { .. })),
+                "{word:?}"
+            );
+        }
     }
 
     #[test]

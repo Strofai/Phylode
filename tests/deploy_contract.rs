@@ -119,3 +119,36 @@ fn the_default_config_reads_exactly_the_lists_the_updater_writes() {
         );
     }
 }
+
+#[test]
+fn the_updater_knows_every_protection_level_and_the_default_config_sets_one() {
+    // A level the service accepts but the updater does not recognize downloads `standard` while
+    // `phylode status` reports the other — the network blocks something other than what it says.
+    let updater = deploy_file("update-blocklists.sh");
+    for word in ["relaxed", "standard", "strict"] {
+        let line = format!("protection = {word}\nlisten = 0.0.0.0:53\nupstream = tls 1.1.1.1 x");
+        let level = phylode::config::Config::parse(&line)
+            .expect("the service accepts every level")
+            .protection();
+        assert_eq!(level.name(), word);
+        assert!(
+            updater.contains(&format!("  {word}) main_file=")),
+            "the updater has no case for protection = {word}"
+        );
+    }
+    let config = phylode::config::Config::parse(&deploy_file("phylode.conf"))
+        .expect("the default configuration parses");
+    assert_eq!(config.protection().name(), "standard");
+}
+
+#[test]
+fn the_list_update_reads_the_configuration_the_installer_writes() {
+    // Without the configuration path the updater reads its built-in default, which is only
+    // right while the two agree.
+    let path = phylode::install::CONFIG_PATH;
+    assert!(
+        deploy_file("com.Phylode.blocklist-update.plist")
+            .contains(&format!("<string>{path}</string>")),
+        "the list update is not given {path}"
+    );
+}

@@ -22,6 +22,18 @@ Phylode 使用 [HaGeZi](https://github.com/hagezi/dns-blocklists) 維護的兩�
 兩份合併、去除重複後約涵蓋 100 萬個網域。你的 Mac 每天 04:17 會下載這兩份名單，確認新版完整之後
 才換上，並保留上一版。名單不在這個 repo 裡；HaGeZi 以 GPL-3.0 授權發布。
 
+想擋少一點或多一點，在 `/usr/local/etc/phylode.conf` 改 `protection`，再執行一次
+`sudo phylode install`：
+
+| 設定 | 第一份名單 | 適合 |
+|---|---|---|
+| `relaxed`（寬鬆） | Multi NORMAL | 家裡沒有人會解除誤擋的網站 |
+| `standard`（標準，預設） | Multi PRO | 大多數的網路 |
+| `strict`（嚴格） | Multi PRO++ | 有人會用 `phylode allow` 修正偶爾的誤擋 |
+
+三種都搭配同一份威脅情資。HaGeZi 最嚴格的 Ultimate 不提供，因為 HaGeZi 自己說它會讓 App 無法正常
+運作。
+
 有些服務無論名單怎麼寫都不會被封鎖：Apple 裝置用來尋找 Wi-Fi 登入頁面的 `captive.apple.com`，
 以及 Apple 的推播通知和私密轉送服務。
 

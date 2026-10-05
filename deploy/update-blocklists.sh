@@ -8,20 +8,42 @@
 # because mv is atomic within one volume. Writing directly to the live file lets the service read
 # a half-written one.
 #
-# Usage: update-blocklists.sh [list directory] (default /usr/local/etc/phylode/lists)
+# Usage: update-blocklists.sh [list directory] [configuration file]
+# (defaults /usr/local/etc/phylode/lists and /usr/local/etc/phylode.conf)
 # Exit codes: 0 if every list succeeded; 1 if any failed (a failed list keeps its previous
 # version, so blocking continues).
 
 set -euo pipefail
 
 DIR="${1:-/usr/local/etc/phylode/lists}"
+CONFIG="${2:-/usr/local/etc/phylode.conf}"
 
-# name filename. The combination Hagezi recommends: one tier (Pro) plus threat intelligence
-# (TIF), used as a union.
-# TIF uses Medium: the full feed's 2.77 million entries are too large, and Mini covers only the
-# few most important sources.
+# The configuration's `protection` line picks HaGeZi's tier; the last one wins, as in the
+# service. What breaks if you change it: the names must match `Protection` in
+# src/config/mod.rs, which refuses anything else, so a word unknown here is only ever met
+# while the service is refusing to start too.
+# A missing file means the default level, as the service has none to read either.
+protection=""
+if [[ -r "$CONFIG" ]]; then
+  protection="$(sed -nE 's/^[[:space:]]*protection[[:space:]]*=[[:space:]]*"?([a-z]+)"?[[:space:]]*(#.*)?$/\1/p' \
+    "$CONFIG" | tail -1)"
+fi
+case "${protection:-standard}" in
+  relaxed) main_file="multi-onlydomains.txt" ;;
+  standard) main_file="pro-onlydomains.txt" ;;
+  strict) main_file="pro.plus-onlydomains.txt" ;;
+  *)
+    echo "$(date '+%F %T') protection = $protection is not relaxed, standard or strict; using standard" >&2
+    main_file="pro-onlydomains.txt"
+    ;;
+esac
+
+# name filename. The combination HaGeZi recommends: one tier plus threat intelligence (TIF),
+# used as a union.
+# TIF uses Medium at every tier: the full feed's 2.77 million entries are too large, and Mini
+# covers only the few most important sources.
 LISTS=(
-  "hagezi-pro pro-onlydomains.txt"
+  "hagezi-main $main_file"
   "hagezi-tif tif.medium-onlydomains.txt"
 )
 # The download links in Hagezi's README point at jsDelivr; GitHub is the fallback.
@@ -29,7 +51,7 @@ MIRRORS=(
   "https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/wildcard"
   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard"
 )
-# Fewer entries than this means a corrupt download. Both lists normally exceed 200,000.
+# Fewer entries than this means a corrupt download. Every tier and the feed normally exceed 150,000.
 MIN_ENTRIES=10000
 # More than this, or a file larger than MAX_BYTES, means a damaged or hostile download: the two
 # lists hold about a million entries and under 20 MB each. MAX_BYTES must equal

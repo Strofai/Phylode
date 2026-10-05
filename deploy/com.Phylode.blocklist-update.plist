@@ -12,6 +12,7 @@
         <string>/bin/bash</string>
         <string>/usr/local/libexec/phylode-update-lists</string>
         <string>/usr/local/etc/phylode/lists</string>
+        <string>/usr/local/etc/phylode.conf</string>
     </array>
 
     <!-- The same unprivileged account as the service: it owns the list directory and cannot

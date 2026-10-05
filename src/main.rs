@@ -270,6 +270,11 @@ fn status(config_path: &Path) -> ExitCode {
         );
     }
     println!(
+        "Protection: {} ({}, updated daily)",
+        config.protection().name(),
+        config.protection().lists()
+    );
+    println!(
         "Blocked answers cached by devices for: {:?}",
         config.block_ttl()
     );
