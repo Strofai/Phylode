@@ -203,30 +203,40 @@ impl Blocklist {
 /// Parses both the hosts format (`0.0.0.0 ads.example.com`) and plain domain lists,
 /// skipping comments and blank lines.
 fn parse_into(text: &str, out: &mut HashSet<String>) {
-    for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
+    // Also drops local entries common in hosts files, such as `localhost`.
+    out.extend(entries(text).filter(|domain| super::is_list_domain(domain)));
+}
 
+/// How many entries in a list file can never match anything: wildcards (`*.ads.example`),
+/// adblock rules (`||ads.example^`), Unicode written as is rather than as `xn--`. Bare words
+/// such as `localhost`, which hosts files carry on purpose, are not counted.
+///
+/// What breaks if you change it: these are dropped when the list loads, so without this
+/// count a hand-written list that blocks nothing looks the same as one that works.
+pub fn unusable_entries(text: &str) -> usize {
+    entries(text)
+        .filter(|domain| domain.contains('.') && !super::is_list_domain(domain))
+        .count()
+}
+
+/// Every domain-like entry in a list file, lowercased, without a trailing dot.
+fn entries(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.lines().flat_map(|line| {
+        let line = line.split('#').next().unwrap_or("").trim();
         let mut fields = line.split_whitespace();
-        let first = fields.next().unwrap_or_default();
+        let first = fields.next();
         // In the hosts format the first field is an address and the domains follow; in a
         // plain list the first field is already the domain.
-        let candidates: Vec<&str> = if is_ip_literal(first) {
-            fields.collect()
-        } else {
-            vec![first]
+        let candidates: Vec<&str> = match first {
+            Some(address) if is_ip_literal(address) => fields.collect(),
+            Some(domain) => vec![domain],
+            None => Vec::new(),
         };
-
-        for candidate in candidates {
-            let domain = candidate.trim_end_matches('.').to_ascii_lowercase();
-            // Also drops local entries common in hosts files, such as `localhost`.
-            if super::is_list_domain(&domain) {
-                out.insert(domain);
-            }
-        }
-    }
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.trim_end_matches('.').to_ascii_lowercase())
+            .collect::<Vec<_>>()
+    })
 }
 
 fn is_ip_literal(field: &str) -> bool {
@@ -237,6 +247,17 @@ fn is_ip_literal(field: &str) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    /// Should change: wildcards, adblock rules and raw Unicode are counted as unusable.
+    /// Should not change: good entries, hosts-format lines, comments and bare words like
+    /// `localhost` are not counted, and the good entries still load.
+    #[test]
+    fn entries_that_can_never_match_are_counted() {
+        let text = "# a comment\nads.example.com\n0.0.0.0 tracker.example.net\n127.0.0.1 localhost\n*.wild.example\n||adblock.example^\nbücher.example\nxn--bcher-kva.example\n";
+        assert_eq!(unusable_entries(text), 3);
+        let list = Blocklist::new();
+        assert_eq!(list.load_from_str(text), 3);
+    }
 
     fn set(domains: &[&str]) -> DomainSet {
         DomainSet {

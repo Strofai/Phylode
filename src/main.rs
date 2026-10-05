@@ -290,10 +290,11 @@ fn status(config_path: &Path) -> ExitCode {
     );
     for path in config.blocklists() {
         println!(
-            "  · {}{}{}",
+            "  · {}{}{}{}",
             path.display(),
             exists_mark(path),
-            age_mark(path)
+            age_mark(path),
+            unusable_mark(path)
         );
     }
     // Load them the way the service does, so the number matches what the service sees.
@@ -301,8 +302,8 @@ fn status(config_path: &Path) -> ExitCode {
     let optional: Vec<&Path> = config.user_blocklist().into_iter().collect();
     match blocklist.load_all(config.blocklists(), &optional) {
         Ok(_) => println!(
-            "  {} domains will be blocked in total",
-            blocklist.loaded_len().unwrap_or(0)
+            "  {} will be blocked in total",
+            plural(blocklist.loaded_len().unwrap_or(0), "domain", "domains")
         ),
         Err(error) => match blocklist.loaded_len() {
             Some(loaded) => println!(
@@ -318,9 +319,10 @@ fn status(config_path: &Path) -> ExitCode {
     }
     match config.user_blocklist() {
         Some(path) => println!(
-            "Your own blocklist: {}{}",
+            "Your own blocklist: {}{}{}",
             path.display(),
-            exists_mark(path)
+            exists_mark(path),
+            unusable_mark(path)
         ),
         None => println!("Your own blocklist: no user_blocklist set in the configuration"),
     }
@@ -395,6 +397,20 @@ fn exists_mark(path: &Path) -> &'static str {
         ""
     } else {
         " (not created yet)"
+    }
+}
+
+/// Entries in a list file that can never match, which loading drops without a word.
+fn unusable_mark(path: &Path) -> String {
+    match std::fs::read_to_string(path)
+        .map(|text| phylode::policy::blocklist::unusable_entries(&text))
+    {
+        Ok(0) | Err(_) => String::new(),
+        Ok(count) => format!(
+            " (warning: {} can never match — wildcards, adblock rules and Unicode not written as \
+             xn-- are not supported)",
+            plural(count, "entry", "entries")
+        ),
     }
 }
 
