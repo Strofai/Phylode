@@ -197,8 +197,33 @@ fn write_entries(path: &Path, entries: &BTreeSet<String>) -> Result<(), CliError
         std::fs::create_dir_all(parent).map_err(|source| io_error(path, source))?;
     }
     let temporary = path.with_extension("tmp");
-    std::fs::write(&temporary, body).map_err(|source| io_error(path, source))?;
+    write_list_file(&temporary, body.as_bytes()).map_err(|source| io_error(path, source))?;
     std::fs::rename(&temporary, path).map_err(|source| io_error(path, source))
+}
+
+/// Writes a list file readable by everyone and writable only by its owner, whatever the
+/// shell's umask. It is created owner-only first, so it is never writable by others even for
+/// a moment, then opened up to reading.
+///
+/// What breaks if you change it: a plain write takes its permissions from the umask, and an
+/// administrator with `umask 000` would leave a list any account on the Mac can rewrite.
+fn write_list_file(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    // A leftover staging file keeps its old permissions when opened, so start from nothing.
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(body)?;
+    file.sync_all()?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o644))
 }
 
 #[cfg(test)]
@@ -210,6 +235,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Should change: the list ends up owner-writable and readable by everyone, even when the
+    /// file it replaces, or a leftover staging file, was writable by anyone.
+    /// Should not change: the entry is written.
+    #[test]
+    fn a_written_list_is_never_writable_by_other_accounts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir("mode");
+        let allow_file = dir.join("allow.txt");
+        let open_to_all = std::fs::Permissions::from_mode(0o666);
+        std::fs::write(&allow_file, "").unwrap();
+        std::fs::set_permissions(&allow_file, open_to_all.clone()).unwrap();
+        let staging = allow_file.with_extension("tmp");
+        std::fs::write(&staging, "").unwrap();
+        std::fs::set_permissions(&staging, open_to_all).unwrap();
+
+        allow("shop.example.com", Some(&allow_file), None).unwrap();
+
+        let mode = std::fs::metadata(&allow_file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "mode is {mode:o}");
+        assert!(
+            std::fs::read_to_string(&allow_file)
+                .unwrap()
+                .contains("shop.example.com")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
