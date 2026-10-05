@@ -359,8 +359,15 @@ impl Responder for Gatekeeper {
         // Names that only mean something inside the network are answered locally with "does
         // not exist" rather than sent upstream: leaking local hostnames and private
         // address reverse lookups would violate product principle 3. Domains configured as
-        // internal exceptions are forwarded as usual.
-        if policy::local_zone::is_local(query.name().as_str())
+        // internal exceptions are forwarded as usual. A bare host name is local only for the
+        // lookups that find a host: no public name has an address without a dot, while a
+        // validating device may still ask for a top-level domain's other records.
+        let bare_host = policy::local_zone::is_bare_name(query.name().as_str())
+            && matches!(
+                query.record_type(),
+                RecordType::A | RecordType::Aaaa | RecordType::Https
+            );
+        if (bare_host || policy::local_zone::is_local(query.name().as_str()))
             && !self.rebind_guard.is_internal_domain(query.name().as_str())
         {
             self.log(
@@ -683,6 +690,23 @@ mod tests {
                 "{name} should still be forwarded"
             );
         }
+        // A bare host name: local for the lookups that find a host, forwarded for the rest.
+        for record_type in [RecordType::A, RecordType::Aaaa, RecordType::Https] {
+            assert!(
+                matches!(
+                    gatekeeper
+                        .respond(&Query::new(Name::parse("nas"), record_type), device)
+                        .await,
+                    Response::NotFound { .. }
+                ),
+                "nas {record_type:?} should be answered locally"
+            );
+        }
+        let ns = Query::new(Name::parse("com"), RecordType::Other(2));
+        assert!(matches!(
+            gatekeeper.respond(&ns, device).await,
+            Response::Failure
+        ));
         assert_eq!(Disposition::Local.as_str(), "local");
     }
 

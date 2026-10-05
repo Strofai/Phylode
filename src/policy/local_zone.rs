@@ -55,6 +55,17 @@ const LOCAL_ZONES: &[&str] = &[
 ///
 /// Reverse lookups for 172.16/12 and 100.64/10 do not fall on label boundaries, so they are
 /// checked separately.
+/// Whether this is a bare host name with no domain, such as `nas` or `wpad`: a device asking
+/// for a machine on its own network before (or instead of) adding a search domain. No such
+/// host exists on the public internet; the root zone's own names are top-level domains,
+/// which are not looked up as hosts. The caller decides which lookups this applies to.
+///
+/// What breaks if you change it: matching more than one label stops whole domains resolving.
+pub fn is_bare_name(name: &str) -> bool {
+    let name = name.trim().trim_end_matches('.');
+    !name.is_empty() && !name.contains('.')
+}
+
 pub fn is_local(name: &str) -> bool {
     super::any_suffix(name, |rest| {
         LOCAL_ZONES.contains(&rest)
@@ -105,6 +116,16 @@ mod tests {
                 is_local(name),
                 "{name} should be answered locally, not sent upstream"
             );
+        }
+    }
+
+    #[test]
+    fn a_bare_name_has_no_dot() {
+        for name in ["nas", "wpad", "printer.", "NAS"] {
+            assert!(is_bare_name(name), "{name}");
+        }
+        for name in ["", ".", "nas.lan", "example.com"] {
+            assert!(!is_bare_name(name), "{name}");
         }
     }
 
