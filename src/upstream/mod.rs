@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 mod coalesce;
 
 use crate::config::Upstream;
-use crate::dns::{Answer, Exchange, ExchangeError, Query, Signature};
+use crate::dns::{Answer, Checked, Exchange, ExchangeError, Query, Signature};
 use coalesce::Coalescer;
 
 /// How many consecutive failures move an upstream to the back of the rotation.
@@ -55,18 +55,41 @@ pub enum Outcome {
 
 /// The upstream pool. The order is fixed, except that servers failing repeatedly move to the
 /// back.
+/// What the rotation needs from one upstream: ask a question, get an answer or an error.
+/// [`Exchange`] is the real one; tests stand in their own to script outages.
+pub trait Transport: Send + Sync {
+    fn query(&self, query: &Query) -> impl Future<Output = Result<Checked, ExchangeError>> + Send;
+}
+
+impl Transport for Exchange {
+    fn query(&self, query: &Query) -> impl Future<Output = Result<Checked, ExchangeError>> + Send {
+        Exchange::query(self, query)
+    }
+}
+
 #[derive(Debug)]
-pub struct Conductor {
-    members: Vec<Member>,
+pub struct Conductor<T = Exchange> {
+    members: Vec<Member<T>>,
     in_flight: Semaphore,
     /// One in-flight query per (name, type); simultaneous callers wait for that one result.
     pending: Coalescer<Query, Outcome>,
 }
 
 #[derive(Debug)]
-struct Member {
-    exchange: Exchange,
+struct Member<T> {
+    exchange: T,
     consecutive_failures: AtomicU32,
+}
+
+impl<T: Transport> Member<T> {
+    /// Whether this upstream answers [`Query::liveness`]. SERVFAIL counts as not answering:
+    /// a resolver that cannot answer for the root zone can answer nothing.
+    async fn alive(&self) -> bool {
+        matches!(
+            self.exchange.query(&Query::liveness()).await,
+            Ok(checked) if !matches!(checked.answer, Answer::ServerFailure)
+        )
+    }
 }
 
 impl Conductor {
@@ -89,11 +112,17 @@ impl Conductor {
                 })
             })
             .collect::<Result<Vec<_>, ExchangeError>>()?;
-        Ok(Self {
+        Ok(Self::with_transports(members))
+    }
+}
+
+impl<T: Transport> Conductor<T> {
+    fn with_transports(members: Vec<Member<T>>) -> Self {
+        Self {
             members,
             in_flight: Semaphore::new(MAX_IN_FLIGHT),
             pending: Coalescer::default(),
-        })
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -141,21 +170,35 @@ impl Conductor {
         self.pending.run(query, || self.resolve_once(query)).await
     }
 
+    /// An upstream that times out or answers SERVFAIL is asked [`Query::liveness`], which any
+    /// working resolver answers at once. Answered, the trouble is that name's own (its servers
+    /// are slow or broken): the device gets SERVFAIL and nothing counts against the upstream.
+    /// Not answered, the upstream is the trouble: it is counted and the next one is tried.
+    ///
+    /// What breaks if you change it: counting every timeout lets anyone on the network demote
+    /// healthy upstreams by looking up slow names; treating every SERVFAIL as an answer leaves
+    /// the whole network on an upstream that answers nothing else. Moving on without asking
+    /// also sends that name to a second provider for nothing.
     async fn resolve_once(&self, query: &Query) -> Outcome {
         for index in self.order() {
             let member = &self.members[index];
-            match member.exchange.query(query).await {
-                Ok(checked) => {
-                    member.consecutive_failures.store(0, Ordering::Relaxed);
-                    return Outcome::Answered {
-                        answer: checked.answer,
-                        signature: checked.signature,
-                    };
-                }
-                Err(_) => {
-                    member.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-                }
+            if let Ok(checked) = member.exchange.query(query).await
+                && !matches!(checked.answer, Answer::ServerFailure)
+            {
+                member.consecutive_failures.store(0, Ordering::Relaxed);
+                return Outcome::Answered {
+                    answer: checked.answer,
+                    signature: checked.signature,
+                };
             }
+            if member.alive().await {
+                member.consecutive_failures.store(0, Ordering::Relaxed);
+                return Outcome::Answered {
+                    answer: Answer::ServerFailure,
+                    signature: Signature::NotFlagged,
+                };
+            }
+            member.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         }
         Outcome::AllDown
     }
@@ -168,12 +211,11 @@ impl Conductor {
     /// This only resets the counter and never increments it — an upstream still down simply
     /// stays demoted, with nothing further to record.
     async fn reprobe_demoted(&self) {
-        let probe = Query::liveness();
         for member in &self.members {
             if member.consecutive_failures.load(Ordering::Relaxed) < DEMOTE_AFTER_FAILURES {
                 continue;
             }
-            if member.exchange.query(&probe).await.is_ok() {
+            if member.alive().await {
                 member.consecutive_failures.store(0, Ordering::Relaxed);
             }
         }
@@ -236,6 +278,122 @@ pub fn spawn_reprobe(conductor: Arc<Conductor>, on_change: impl Fn(bool) + Send 
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::dns::{Name, RecordType};
+
+    type Reply = Result<Checked, ExchangeError>;
+
+    /// A stand-in upstream that answers by script and counts what it was asked.
+    struct Scripted {
+        reply: fn(&Query) -> Reply,
+        asked: AtomicU32,
+    }
+
+    impl Transport for Scripted {
+        fn query(&self, query: &Query) -> impl Future<Output = Reply> + Send {
+            self.asked.fetch_add(1, Ordering::Relaxed);
+            let reply = (self.reply)(query);
+            async move { reply }
+        }
+    }
+
+    fn answered() -> Reply {
+        Ok(Checked {
+            answer: Answer::NameNotFound {
+                ttl: Duration::from_secs(60),
+            },
+            signature: Signature::NotFlagged,
+        })
+    }
+
+    fn servfail() -> Reply {
+        Ok(Checked {
+            answer: Answer::ServerFailure,
+            signature: Signature::NotFlagged,
+        })
+    }
+
+    fn timed_out() -> Reply {
+        Err(ExchangeError::Query {
+            server_name: "upstream.example".to_string(),
+            source: hickory_server::net::NetError::from("timed out"),
+        })
+    }
+
+    /// Fine, except that this one name never comes back in time.
+    fn slow_name(query: &Query) -> Reply {
+        if *query == Query::liveness() {
+            answered()
+        } else {
+            timed_out()
+        }
+    }
+
+    /// Fine, except that this one name's own servers are broken.
+    fn broken_name(query: &Query) -> Reply {
+        if *query == Query::liveness() {
+            answered()
+        } else {
+            servfail()
+        }
+    }
+
+    fn pool(primary: fn(&Query) -> Reply) -> Conductor<Scripted> {
+        let member = |reply| Member {
+            exchange: Scripted {
+                reply,
+                asked: AtomicU32::new(0),
+            },
+            consecutive_failures: AtomicU32::new(0),
+        };
+        Conductor::with_transports(vec![member(primary), member(|_| answered())])
+    }
+
+    fn lookup() -> Query {
+        Query::new(Name::parse("www.example.com"), RecordType::A)
+    }
+
+    /// Should change: a name that times out, or that its own servers break, gets SERVFAIL
+    /// while the upstream still answers the root, with nothing counted against it.
+    /// Should not change: the second upstream never hears of that name.
+    #[tokio::test]
+    async fn a_slow_or_broken_name_does_not_count_against_the_upstream() {
+        for script in [slow_name as fn(&Query) -> Reply, broken_name] {
+            let c = pool(script);
+            for _ in 0..DEMOTE_AFTER_FAILURES + 1 {
+                assert!(matches!(
+                    c.resolve(&lookup()).await,
+                    Outcome::Answered {
+                        answer: Answer::ServerFailure,
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(c.order(), vec![0, 1], "still first in line");
+            assert_eq!(c.members[1].exchange.asked.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    /// Should change: an upstream that answers SERVFAIL to everything, the root included, is
+    /// counted and the next one answers instead.
+    /// Should not change: an upstream that answers nothing at all is handled the same way.
+    #[tokio::test]
+    async fn an_upstream_that_fails_everything_hands_over_to_the_next() {
+        for script in [(|_| servfail()) as fn(&Query) -> Reply, |_| timed_out()] {
+            let c = pool(script);
+            for _ in 0..DEMOTE_AFTER_FAILURES {
+                assert!(matches!(
+                    c.resolve(&lookup()).await,
+                    Outcome::Answered {
+                        answer: Answer::NameNotFound { .. },
+                        ..
+                    }
+                ));
+            }
+            assert_eq!(c.order(), vec![1, 0], "demoted behind the working one");
+            c.reprobe_demoted().await;
+            assert_eq!(c.order(), vec![1, 0], "a reprobe does not restore it");
+        }
+    }
 
     fn conductor(text: &str) -> Conductor {
         let config = Config::parse(text).expect("test configuration should parse");
