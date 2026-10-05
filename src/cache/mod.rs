@@ -32,6 +32,18 @@ const FRESH_FLOOR: Duration = Duration::from_secs(1);
 /// reason.
 const NEGATIVE_CEILING: Duration = Duration::from_secs(60 * 60);
 
+/// The most memory the cache's answers may take together. Entries are evicted oldest-first
+/// past this, as they are past the entry limit. The default 20,000 entries of ordinary
+/// answers use a fraction of it.
+///
+/// What breaks if you change it: the entry limit alone does not bound memory — anyone on the
+/// network can look up names whose answers are made large, and each stays for up to a day.
+const MEMORY_BUDGET: usize = 64 * 1024 * 1024;
+
+/// An answer larger than this is delivered but not remembered. About a hundred ordinary
+/// records; real answers rarely come close.
+const MAX_ENTRY_MEMORY: usize = 32 * 1024;
+
 /// Answers that may be remembered: records, or an upstream explicitly saying there are none
 /// (RFC 2308 negative caching).
 ///
@@ -69,6 +81,19 @@ impl Cached {
 
     /// Returns a copy whose TTL has the time spent in the cache subtracted, with a floor of
     /// one second (same reasoning as [`Records::aged`]).
+    /// Roughly how much memory this answer takes once stored. Negative answers hold no
+    /// records and cost only their entry.
+    fn memory(&self) -> usize {
+        let records = match self {
+            Self::Records(records) => records.memory_estimate(),
+            Self::NameNotFound { .. } | Self::NoRecordsOfType { .. } => 0,
+        };
+        // The query is stored twice: as the map key and in the recency order.
+        records
+            .saturating_add(std::mem::size_of::<Entry>())
+            .saturating_add(2 * std::mem::size_of::<Query>())
+    }
+
     fn aged(&self, elapsed: Duration) -> Self {
         let left = |ttl: &Duration| ttl.saturating_sub(elapsed).max(FRESH_FLOOR);
         match self {
@@ -98,6 +123,7 @@ pub enum Hit {
 #[derive(Debug)]
 pub struct Cache {
     capacity: usize,
+    memory_budget: usize,
     stale_max_age: Duration,
     inner: Mutex<Inner>,
 }
@@ -109,6 +135,8 @@ struct Inner {
     /// O(log n).
     order: BTreeMap<u64, Query>,
     next_tick: u64,
+    /// The sum of every entry's `memory`.
+    memory: usize,
 }
 
 #[derive(Debug)]
@@ -117,6 +145,7 @@ struct Entry {
     stored_at: Instant,
     fresh_until: Instant,
     tick: u64,
+    memory: usize,
 }
 
 impl Cache {
@@ -125,6 +154,7 @@ impl Cache {
     pub fn new(capacity: usize, stale_max_age: Duration) -> Self {
         Self {
             capacity: capacity.max(1),
+            memory_budget: MEMORY_BUDGET,
             stale_max_age,
             inner: Mutex::new(Inner::default()),
         }
@@ -165,9 +195,7 @@ impl Cache {
         if too_old {
             // Expired and past the stale window; keeping it would only hand out answers from
             // months ago.
-            let tick = entry.tick;
-            inner.entries.remove(query);
-            inner.order.remove(&tick);
+            inner.remove(query);
             return Hit::Miss;
         }
 
@@ -185,14 +213,19 @@ impl Cache {
 
     fn insert_at(&self, query: Query, answer: Cached, now: Instant) {
         let ttl = answer.fresh_for();
+        let memory = answer.memory();
 
         let mut inner = self.lock();
-        if let Some(old) = inner.entries.remove(&query) {
-            inner.order.remove(&old.tick);
+        // The older answer goes even when the new one is too large to keep: it is no longer
+        // what the upstream says.
+        inner.remove(&query);
+        if memory > MAX_ENTRY_MEMORY {
+            return;
         }
 
         let tick = inner.take_tick();
         inner.order.insert(tick, query.clone());
+        inner.memory = inner.memory.saturating_add(memory);
         inner.entries.insert(
             query,
             Entry {
@@ -200,10 +233,17 @@ impl Cache {
                 stored_at: now,
                 fresh_until: now + ttl,
                 tick,
+                memory,
             },
         );
 
-        inner.evict_down_to(self.capacity);
+        inner.evict_down_to(self.capacity, self.memory_budget);
+    }
+
+    /// Test only: how much memory the stored answers are counted as taking.
+    #[cfg(test)]
+    fn memory(&self) -> usize {
+        self.lock().memory
     }
 
     /// Test only: holds the cache lock, simulating a thread that seized it and hung.
@@ -242,16 +282,23 @@ impl Inner {
         }
     }
 
-    /// Evicts the least recently used entries one at a time until the count is back within
-    /// capacity. Deliberately never a bulk clear.
-    fn evict_down_to(&mut self, capacity: usize) {
-        while self.entries.len() > capacity {
-            let Some((&tick, _)) = self.order.iter().next() else {
+    /// Drops one entry and its share of the memory count. Every removal goes through here, or
+    /// the count drifts and the memory bound stops meaning anything.
+    fn remove(&mut self, query: &Query) {
+        if let Some(old) = self.entries.remove(query) {
+            self.order.remove(&old.tick);
+            self.memory = self.memory.saturating_sub(old.memory);
+        }
+    }
+
+    /// Evicts the least recently used entries one at a time until both the count and the
+    /// memory are back within bounds. Deliberately never a bulk clear.
+    fn evict_down_to(&mut self, capacity: usize, memory_budget: usize) {
+        while self.entries.len() > capacity || self.memory > memory_budget {
+            let Some(query) = self.order.values().next().cloned() else {
                 break;
             };
-            if let Some(query) = self.order.remove(&tick) {
-                self.entries.remove(&query);
-            }
+            self.remove(&query);
         }
     }
 }
@@ -324,6 +371,93 @@ mod tests {
             c.len(),
             0,
             "an over-age entry is cleaned up on the way past"
+        );
+    }
+
+    fn addresses(count: u16) -> Cached {
+        let addresses: Vec<std::net::IpAddr> = (0..count)
+            .map(|i| std::net::Ipv4Addr::new(203, 0, 113, (i % 250) as u8).into())
+            .collect();
+        Cached::Records(Records::from_addresses(
+            &Name::parse("big.example.com"),
+            Duration::from_secs(300),
+            &addresses,
+        ))
+    }
+
+    /// Should change: an answer past the per-entry limit is not stored, and the older answer
+    /// for the same query goes with it.
+    /// Should not change: an ordinary answer is stored as before.
+    #[test]
+    fn an_oversized_answer_is_not_remembered() {
+        let c = cache();
+        let now = Instant::now();
+        c.insert_at(query("big.example.com"), addresses(2), now);
+        assert!(matches!(
+            c.get_at(&query("big.example.com"), now),
+            Hit::Fresh(_)
+        ));
+
+        c.insert_at(query("big.example.com"), addresses(1000), now);
+        assert!(matches!(
+            c.get_at(&query("big.example.com"), now),
+            Hit::Miss
+        ));
+        assert_eq!(c.len(), 0);
+        assert_eq!(c.memory(), 0);
+    }
+
+    /// Should change: once stored answers pass the memory budget, the least recently used go,
+    /// one at a time, while the entry count is still under capacity.
+    /// Should not change: the newest answer survives.
+    #[test]
+    fn the_memory_budget_evicts_the_oldest_answers() {
+        let one = addresses(20).memory();
+        let c = Cache {
+            memory_budget: 3 * one,
+            ..Cache::new(100, Duration::from_secs(60))
+        };
+        let now = Instant::now();
+        for name in [
+            "a.example.com",
+            "b.example.com",
+            "c.example.com",
+            "d.example.com",
+        ] {
+            c.insert_at(query(name), addresses(20), now);
+        }
+        assert_eq!(c.len(), 3);
+        assert_eq!(c.memory(), 3 * one);
+        assert!(matches!(c.get_at(&query("a.example.com"), now), Hit::Miss));
+        assert!(matches!(
+            c.get_at(&query("d.example.com"), now),
+            Hit::Fresh(_)
+        ));
+    }
+
+    /// Should not change: replacing, expiring and evicting leave the memory count matching what
+    /// is actually stored.
+    #[test]
+    fn the_memory_count_follows_every_removal() {
+        let c = Cache::new(2, Duration::from_secs(60));
+        let now = Instant::now();
+        let one = addresses(3).memory();
+        c.insert_at(query("a.example.com"), addresses(3), now);
+        c.insert_at(query("a.example.com"), addresses(3), now);
+        assert_eq!(c.memory(), one, "a rewrite replaces, it does not add");
+        c.insert_at(query("b.example.com"), addresses(3), now);
+        c.insert_at(query("c.example.com"), addresses(3), now);
+        assert_eq!(c.memory(), 2 * one, "eviction gives the memory back");
+
+        let long_after = now + Duration::from_secs(24 * 60 * 60);
+        assert!(matches!(
+            c.get_at(&query("b.example.com"), long_after),
+            Hit::Miss
+        ));
+        assert_eq!(
+            c.memory(),
+            one,
+            "dropping an expired answer gives the memory back"
         );
     }
 

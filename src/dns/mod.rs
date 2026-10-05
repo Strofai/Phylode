@@ -175,6 +175,23 @@ impl Records {
         )
     }
 
+    /// Roughly how many bytes of memory this set occupies: each record's fixed size plus its
+    /// encoded length, which tracks the names and data it holds on the heap. A record that
+    /// cannot be encoded counts as unboundedly large.
+    ///
+    /// What breaks if you change it: counting the wire size alone undercounts an answer of
+    /// many small records several times over, and the cache's memory bound stops holding.
+    pub fn memory_estimate(&self) -> usize {
+        use hickory_proto::serialize::binary::BinEncodable;
+
+        self.0.iter().fold(0, |total, record| {
+            let encoded = record.to_bytes().map_or(usize::MAX, |bytes| bytes.len());
+            total
+                .saturating_add(std::mem::size_of::<Record>())
+                .saturating_add(encoded)
+        })
+    }
+
     /// Every address in this set a device might connect to: A/AAAA, plus the `ipv4hint` and
     /// `ipv6hint` of HTTPS/SVCB records (RFC 9460 §7.3 — Safari queries the HTTPS type first
     /// and connects straight to the hinted address). The rebinding defence uses this to see
