@@ -158,7 +158,18 @@ impl Command {
             Self::Status { config_path } => status(&config_path),
             Self::Diagnostics { config_path } => diagnostics(&config_path),
             Self::Report { config_path, days } => weekly_report(&config_path, days),
-            Self::Install => finish(install::install()),
+            Self::Install => {
+                let result = install::install();
+                let failed = result.is_err();
+                let code = finish(result);
+                if failed && install::this_mac_uses_it() {
+                    log_line!(
+                        "This Mac still uses Phylode for DNS, and it may not be running now. To \
+                         get DNS back until install succeeds: sudo phylode off"
+                    );
+                }
+                code
+            }
             Self::On => finish(install::on().map(|switched| {
                 println!("This Mac now uses Phylode for DNS on:");
                 for service in switched.services {

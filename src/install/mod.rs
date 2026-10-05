@@ -308,6 +308,20 @@ pub fn off() -> Result<Vec<String>, InstallError> {
     Ok(restored)
 }
 
+/// Whether any of this Mac's network services points at the gatekeeper. `false` when that
+/// cannot be read.
+///
+/// Used after a failed install: an update that stopped the old service but could not start
+/// the new one leaves such a Mac resolving nothing, and `phylode off` is the way back.
+pub fn this_mac_uses_it() -> bool {
+    network_services().is_ok_and(|services| {
+        services.iter().any(|service| {
+            run(NETWORKSETUP, &["-getdnsservers", service])
+                .is_ok_and(|servers| points_at_gatekeeper(&servers))
+        })
+    })
+}
+
 /// Where `on` keeps each network service's DNS servers from before, one `service<TAB>servers`
 /// line each, `empty` meaning automatic.
 const DNS_BEFORE_ON_PATH: &str = "/usr/local/etc/phylode/dns-before-on.tsv";
@@ -640,8 +654,25 @@ fn write_file(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| io_error(parent, source))?;
     }
-    fs::write(path, contents).map_err(|source| io_error(path, source))?;
-    set_owner_and_mode(path, mode, uid, gid)
+    // Written beside the target and renamed over it, owner and mode already set. What breaks
+    // if you change it: rewritten in place, a list update already running reads the new
+    // script from where it had got to in the old one (bash reads as it goes), and launchd or
+    // a reader can see a half-written file.
+    let staged = staged_path(path);
+    remove_if_present(&staged)?;
+    fs::write(&staged, contents).map_err(|source| io_error(&staged, source))?;
+    set_owner_and_mode(&staged, mode, uid, gid)?;
+    fs::rename(&staged, path).map_err(|source| io_error(path, source))
+}
+
+/// Where a file is written before it replaces `path`: the same folder, so the rename is
+/// atomic.
+fn staged_path(path: &Path) -> PathBuf {
+    let name = path.file_name().map_or_else(
+        || "phylode".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    path.with_file_name(format!("{name}.phylode-new"))
 }
 
 fn make_dir(path: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), InstallError> {
@@ -774,6 +805,34 @@ mod tests {
     /// `empty` for its "none set" sentence; a saved file round-trips.
     /// Should not change: anything that is not an address is never kept, so a tampered file
     /// cannot slip other arguments to `networksetup`.
+    /// Should change: a file being replaced is swapped for a new one, so whoever already has
+    /// the old one open (bash running the updater) keeps reading the old contents whole.
+    /// Should not change: the path ends up with the new contents and the requested mode, and
+    /// nothing is left beside it.
+    #[test]
+    fn a_replaced_file_is_swapped_not_rewritten_in_place() {
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = std::env::temp_dir().join(format!("phylode-swap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("phylode-update-lists");
+        std::fs::write(&path, "old script\n").unwrap();
+        let mut reader = std::fs::File::open(&path).unwrap();
+        let me = std::fs::metadata(&dir).unwrap();
+
+        write_file(&path, "new script\n", 0o755, me.uid(), me.gid()).unwrap();
+
+        let mut seen = String::new();
+        reader.read_to_string(&mut seen).unwrap();
+        assert_eq!(seen, "old script\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new script\n");
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn dns_servers_from_before_are_saved_and_read_back() {
         assert_eq!(
