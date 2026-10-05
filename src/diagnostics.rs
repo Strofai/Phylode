@@ -197,8 +197,25 @@ fn redact(line: &str) -> String {
 }
 
 /// One run of hex digits, dots and colons: an address, an address with a port, or
-/// something else that is left alone.
+/// something else that is left alone. Punctuation the run picked up from the sentence around
+/// it (`from:192.0.2.5`, `…192.0.2.5.`) is set aside first.
+///
+/// What breaks if you change it: try the whole run before trimming, or `::ffff:192.0.2.5`
+/// loses its leading colons and no longer reads as an address.
 fn redact_token(token: &str) -> String {
+    let end = token.trim_end_matches(['.', ':']).len();
+    let start = token[..end].find(|c| c != '.' && c != ':').unwrap_or(end);
+    for (from, to) in [(0, token.len()), (0, end), (start, end)] {
+        if let Some(replaced) = redact_address(&token[from..to]) {
+            return format!("{}{replaced}{}", &token[..from], &token[to..]);
+        }
+    }
+    token.to_string()
+}
+
+/// The replacement for `token` when it is exactly an address worth hiding (with or without an
+/// IPv4 port), or `None`.
+fn redact_address(token: &str) -> Option<String> {
     let (address, port) = match token.parse::<IpAddr>() {
         Ok(ip) => (Some(ip), ""),
         Err(_) => match token.rsplit_once(':') {
@@ -210,8 +227,8 @@ fn redact_token(token: &str) -> String {
         },
     };
     match address {
-        Some(ip) if !ip.is_loopback() && !ip.is_unspecified() => format!("<address>{port}"),
-        _ => token.to_string(),
+        Some(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(format!("<address>{port}")),
+        _ => None,
     }
 }
 
@@ -255,6 +272,28 @@ mod tests {
             redact("2026-09-14 20:24:36 Blocklist loaded: 1060000 domains, v0.1.0"),
             "2026-09-14 20:24:36 Blocklist loaded: 1060000 domains, v0.1.0"
         );
+    }
+
+    /// Should change: an address touching the punctuation of the sentence around it is still
+    /// removed, and that punctuation stays.
+    /// Should not change: loopback stays even with punctuation, and plain hex words stay.
+    #[test]
+    fn addresses_next_to_punctuation_are_removed_too() {
+        for (line, expected) in [
+            ("no answer from 192.0.2.5.", "no answer from <address>."),
+            (
+                "sent to 192.0.2.5: timed out",
+                "sent to <address>: timed out",
+            ),
+            ("from:192.0.2.5 again", "from:<address> again"),
+            ("peer 2001:db8::7.", "peer <address>."),
+            ("mapped ::ffff:192.0.2.5.", "mapped <address>."),
+            ("[fe80::1%en0]", "[<address>%en0]"),
+            ("on 127.0.0.1. Fine", "on 127.0.0.1. Fine"),
+            ("cafe: beef.", "cafe: beef."),
+        ] {
+            assert_eq!(redact(line), expected, "{line}");
+        }
     }
 
     /// Should change: a configuration that fails to parse is described by line and key, never
