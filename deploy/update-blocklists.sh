@@ -39,38 +39,58 @@ MAX_BYTES=67108864
 
 mkdir -p "$DIR"
 status=0
+tmp=""
+# A run stopped part-way (launchd, a shutdown) must not leave a staging file of up to MAX_BYTES
+# behind. The handler reads tmp when it runs, so it always removes the current one.
+trap 'rm -f "$tmp"' EXIT
+trap 'exit 1' INT TERM HUP
+
+# Checks a downloaded list; prints why it is unusable, or nothing when it is fine.
+# The service refuses a file that is not UTF-8, so installing one would leave no list at the
+# next restart. The count declared in the header must match the actual line count: a
+# truncated file, an error page and an empty file all fail this check.
+problem_with() {
+  local file="$1" declared actual
+  if ! iconv -f UTF-8 -t UTF-8 "$file" >/dev/null 2>&1; then
+    echo "not valid UTF-8"
+    return
+  fi
+  declared="$(grep -m1 '^# Number of entries:' "$file" | awk '{print $NF}' || true)"
+  actual="$(grep -vc '^#' "$file" || true)"
+  if [[ -z "$declared" || "$declared" != "$actual" || "$actual" -lt $MIN_ENTRIES || "$actual" -gt $MAX_ENTRIES ]]; then
+    echo "header says ${declared:-none}, actual $actual"
+  fi
+}
 
 for entry in "${LISTS[@]}"; do
   read -r name file <<<"$entry"
   target="$DIR/$name.txt"
   tmp="$(mktemp "$DIR/.$name.XXXXXX")"
 
-  fetched=0
+  # A mirror that answers with a damaged file is treated like one that does not answer: the
+  # next one is tried.
+  usable=0
   for mirror in "${MIRRORS[@]}"; do
-    if curl -fsSL --proto '=https' --tlsv1.2 --max-time 300 --max-filesize "$MAX_BYTES" -o "$tmp" "$mirror/$file"; then
-      fetched=1
+    if ! curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 --max-time 300 \
+      --max-filesize "$MAX_BYTES" -o "$tmp" "$mirror/$file"; then
+      echo "$(date '+%F %T') ${name}: download from $mirror failed, trying the next" >&2
+      continue
+    fi
+    problem="$(problem_with "$tmp")"
+    if [[ -z "$problem" ]]; then
+      usable=1
       break
     fi
-    echo "$(date '+%F %T') ${name}: download from $mirror failed, trying the next" >&2
+    echo "$(date '+%F %T') ${name}: download from $mirror failed validation ($problem), trying the next" >&2
   done
 
-  if [[ $fetched -eq 0 ]]; then
-    echo "$(date '+%F %T') ${name}: every source failed, keeping the previous list" >&2
+  if [[ $usable -eq 0 ]]; then
+    echo "$(date '+%F %T') ${name}: no source gave a usable list, keeping the previous one" >&2
     rm -f "$tmp"
     status=1
     continue
   fi
-
-  # The count declared in the header must match the actual line count: a truncated file, an
-  # error page and an empty file all fail this check.
-  declared="$(grep -m1 '^# Number of entries:' "$tmp" | awk '{print $NF}' || true)"
   actual="$(grep -vc '^#' "$tmp" || true)"
-  if [[ -z "$declared" || "$declared" != "$actual" || "$actual" -lt $MIN_ENTRIES || "$actual" -gt $MAX_ENTRIES ]]; then
-    echo "$(date '+%F %T') ${name}: validation failed (header says ${declared:-none}, actual $actual), keeping the previous list" >&2
-    rm -f "$tmp"
-    status=1
-    continue
-  fi
 
   if [[ -f "$target" ]]; then
     cp -p "$target" "$DIR/$name.prev.txt"
