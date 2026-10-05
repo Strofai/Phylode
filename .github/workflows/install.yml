@@ -149,6 +149,75 @@ jobs:
           done
           echo "::error::the service did not come back"; exit 1
 
+      # Stuck but still running is what launchd cannot see. Dropping UDP on the loopback interface
+      # makes the self health check go unanswered while the process stays alive.
+      - name: A service that stops answering restarts itself, and the summary says so
+        run: |
+          pid=$(pgrep -x phylode)
+          echo "block drop quick on lo0 proto udp from any to any port 53" | sudo pfctl -q -f -
+          token=$(sudo pfctl -E 2>&1 | sed -n 's/.*Token : //p')
+          start=$(date +%s)
+          restarted=0
+          for _ in $(seq 1 90); do
+            new=$(pgrep -x phylode || true)
+            if [ -n "$new" ] && [ "$new" != "$pid" ]; then restarted=1; break; fi
+            sleep 1
+          done
+          sudo pfctl -q -X "$token" || sudo pfctl -q -d || true
+          sudo pfctl -q -f /etc/pf.conf
+          if [ "$restarted" -ne 1 ]; then echo "::error::a service that stopped answering was not restarted"; exit 1; fi
+          echo "restarted itself after $(( $(date +%s) - start ))s: pid $pid -> $new"
+          answered=0
+          for _ in $(seq 1 30); do
+            if dig @127.0.0.1 apple.com +short +time=1 +tries=1 | grep -q .; then answered=1; break; fi
+            sleep 1
+          done
+          if [ "$answered" -ne 1 ]; then echo "::error::no answers after the restart"; exit 1; fi
+          report=$(phylode report)
+          echo "$report" | sed -n '/own health/,$p'
+          echo "$report" | grep -q "Phylode stopped answering and restarted itself" \
+            || { echo "::error::the weekly summary does not mention the restart"; exit 1; }
+
+      # The query for a made-up name must leave this Mac only inside TLS. Loopback is captured
+      # too, as the control: the same grep has to find the name there in plaintext.
+      - name: Queries leave the Mac encrypted, with no name in plaintext
+        run: |
+          iface=$(route -n get default | awk '/interface:/{print $2}')
+          name="leak-check-$RANDOM$RANDOM"
+          sudo tcpdump -i "$iface" -nn -U -w "$RUNNER_TEMP/out.pcap" 2>/dev/null &
+          sudo tcpdump -i lo0 -nn -U -w "$RUNNER_TEMP/lo.pcap" 'udp port 53' 2>/dev/null &
+          sleep 2
+          # A fresh start, so the capture holds the TLS handshake as well as the query.
+          sudo launchctl kickstart -k system/com.Phylode.gatekeeper
+          for _ in $(seq 1 30); do
+            if dig @127.0.0.1 captive.apple.com +short +time=1 +tries=1 | grep -q .; then break; fi
+            sleep 1
+          done
+          dig @127.0.0.1 "$name.example.com" +time=3 +tries=1 || true
+          sleep 2
+          sudo pkill tcpdump || true
+          sleep 1
+          sudo chmod a+r "$RUNNER_TEMP/out.pcap" "$RUNNER_TEMP/lo.pcap"
+          grep -aq "$name" "$RUNNER_TEMP/lo.pcap" \
+            || { echo "::error::control failed: the name is not in the loopback capture either"; exit 1; }
+          if grep -aq "$name" "$RUNNER_TEMP/out.pcap"; then
+            echo "::error::$name left the Mac in plaintext"; exit 1
+          fi
+          plain=$(tcpdump -r "$RUNNER_TEMP/out.pcap" -nn 'port 53 and (host 1.1.1.1 or host 9.9.9.9)' 2>/dev/null | wc -l)
+          if [ "$plain" -ne 0 ]; then echo "::error::$plain plaintext DNS packets to an upstream"; exit 1; fi
+          encrypted=$(tcpdump -r "$RUNNER_TEMP/out.pcap" -nn \
+            '(host 1.1.1.1 and tcp port 853) or (host 9.9.9.9 and tcp port 443)' 2>/dev/null | wc -l)
+          if [ "$encrypted" -eq 0 ]; then echo "::error::no traffic to an encrypted upstream"; exit 1; fi
+          # A TLS record starts with its type: 0x16 is a handshake. DoT sends no server name
+          # (hickory turns SNI off), so the record type is what shows the session is TLS.
+          tls='tcp[((tcp[12:1] & 0xf0) >> 2):1] = 0x16'
+          handshakes=$(tcpdump -r "$RUNNER_TEMP/out.pcap" -nn \
+            "((dst host 1.1.1.1 and tcp dst port 853) or (dst host 9.9.9.9 and tcp dst port 443)) and $tls" \
+            2>/dev/null | wc -l)
+          if [ "$handshakes" -eq 0 ]; then echo "::error::no TLS handshake with an upstream"; exit 1; fi
+          echo "loopback: $name in plaintext (control); outside: $encrypted packets to an encrypted upstream,"
+          echo "$handshakes of them TLS handshake records, no plaintext DNS to it, and $name nowhere in the capture"
+
       - name: on and off switch this Mac's DNS
         # A negated command (! cmd) never fails a step under set -e, so each check is explicit.
         run: |
