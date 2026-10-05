@@ -44,6 +44,9 @@ const LIST_WAIT: Duration = Duration::from_secs(120);
 const ANSWER_WAIT: Duration = Duration::from_secs(15);
 /// How long `install` waits for the service to finish loading the lists after it answers.
 const LOAD_WAIT: Duration = Duration::from_secs(60);
+/// How long `uninstall` waits for launchd to unload a job. launchd gives a job 20 seconds to
+/// exit after SIGTERM (`ExitTimeOut`), so this allows for that.
+const BOOTOUT_WAIT: Duration = Duration::from_secs(25);
 
 /// The line the service writes to its log once the blocklist is in memory. `install` watches
 /// for it. What breaks if you change it: the service prints this constant, so the two stay in
@@ -101,6 +104,11 @@ pub enum InstallError {
          {failed}. Run the same command again once that is fixed"
     )]
     SomeServices { changed: String, failed: String },
+    #[error(
+        "launchd still has {label} loaded, so nothing was removed; check it with `sudo launchctl \
+         print system/{label}` and run uninstall again"
+    )]
+    StillLoaded { label: String },
 }
 
 /// The folders `install` writes into as root, whose contents the boot service or `sudo
@@ -373,8 +381,16 @@ fn write_saved_dns(
 pub fn uninstall() -> Result<Vec<String>, InstallError> {
     // DNS goes first: once the service stops, a Mac still pointing at it resolves nothing.
     let restored = off()?;
-    bootout(GATEKEEPER_LABEL);
-    bootout(UPDATE_LABEL);
+    // Files go only once both jobs are gone. What breaks if you change it: deleting the plists
+    // of a job launchd still has loaded leaves a running service nothing can manage any more.
+    for label in [GATEKEEPER_LABEL, UPDATE_LABEL] {
+        bootout(label);
+        if !wait_for(BOOTOUT_WAIT, || !is_loaded(label)) {
+            return Err(InstallError::StillLoaded {
+                label: label.to_string(),
+            });
+        }
+    }
     // Not an error when it was never added (the firewall was set up by hand, say).
     let _ = run(SOCKETFILTERFW, &["--remove", BINARY_PATH]);
     for path in [
@@ -384,6 +400,7 @@ pub fn uninstall() -> Result<Vec<String>, InstallError> {
         BINARY_PATH,
     ] {
         remove_if_present(Path::new(path))?;
+        remove_if_present(&staged_path(Path::new(path)))?;
     }
     // Left behind only by an install that stopped between copying and renaming.
     remove_if_present(&Path::new(BINARY_PATH).with_extension("new"))?;
@@ -715,6 +732,11 @@ fn bootout(label: &str) {
 }
 
 /// Polls `ready` once a second until it holds or `limit` passes.
+/// Whether launchd still has this job loaded.
+fn is_loaded(label: &str) -> bool {
+    run(LAUNCHCTL, &["print", &format!("system/{label}")]).is_ok()
+}
+
 fn wait_for(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
     loop {
