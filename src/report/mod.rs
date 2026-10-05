@@ -100,14 +100,18 @@ impl Summary {
         for day in days {
             match std::fs::read_to_string(journal::queries_file(directory, day)) {
                 Ok(text) => {
-                    summary.absorb_queries(&text, &mut blocked_counts, &mut per_client_domain);
+                    summary.absorb_queries(
+                        &journal::printable(&text),
+                        &mut blocked_counts,
+                        &mut per_client_domain,
+                    );
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => summary.unreadable_files.push(format!("{day}.tsv")),
             }
 
             match std::fs::read_to_string(journal::events_file(directory, day)) {
-                Ok(text) => summary.absorb_events(&text),
+                Ok(text) => summary.absorb_events(&journal::printable(&text)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => summary.unreadable_files.push(format!("events-{day}.tsv")),
             }
@@ -696,6 +700,33 @@ mod tests {
         );
         assert!(!text.contains("every upstream was unreachable"), "{text}");
         assert!(!text.contains("Everything else normal"), "{text}");
+    }
+
+    /// Should change: escape sequences planted in the journal files reach the summary as `_`.
+    /// Should not change: the event and the device are still reported.
+    #[test]
+    fn control_characters_in_the_journal_are_not_printed() {
+        let dir = std::env::temp_dir().join(format!("phylode-report-{}-esc", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("2026-09-14.tsv"),
+            "2026-09-14 10:00:00\t10.0.0.\x1b[2J5\tads.example.com\tA\tblocked\tlist\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("events-2026-09-14.tsv"),
+            "2026-09-14 10:00:00\tblocklist-failed\tgone\x1b]0;owned\x07\n",
+        )
+        .unwrap();
+        let text = Summary::gather(&dir, &one_day()).render();
+        assert!(
+            !text.chars().any(|c| c == '\x1b' || c == '\x07'),
+            "{text:?}"
+        );
+        assert!(text.contains("10.0.0._[2J5"), "{text}");
+        assert!(text.contains("gone_]0;owned_"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

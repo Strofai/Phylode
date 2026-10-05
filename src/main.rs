@@ -444,6 +444,7 @@ fn diagnostics(config_path: &Path) -> ExitCode {
         user_blocklist_entries: None,
         events: Vec::new(),
         log: std::fs::read_to_string(install::SERVICE_LOG)
+            .map(|text| journal::printable(&text))
             .map_err(|error| format!("could not read {}: {error}", install::SERVICE_LOG)),
     };
 
@@ -463,6 +464,7 @@ fn diagnostics(config_path: &Path) -> ExitCode {
             else {
                 continue;
             };
+            let text = journal::printable(&text);
             facts.events.extend(text.lines().filter_map(|line| {
                 let mut fields = line.split('\t');
                 Some((fields.next()?.to_string(), fields.next()?.to_string()))

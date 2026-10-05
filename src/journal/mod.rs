@@ -407,6 +407,24 @@ fn format_line(record: &Record, zone: &LocalZone) -> String {
 /// Without this substitution, a name containing a newline could forge an entire query entry
 /// in the journal. Empty values become `-` because a trailing empty column is swallowed by
 /// any reader that trims whitespace, silently shortening the row.
+/// Text read back from the journal directory, made safe to print: control characters other
+/// than tabs and line breaks become `_`.
+///
+/// What breaks if you change it: the service account can write those files, so whoever took
+/// it over could hide terminal escape sequences in them; printed as read, they would act on
+/// the administrator's terminal. `sanitize` only covers what this program writes.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\t' && c != '\n' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn sanitize(value: &str) -> String {
     if value.is_empty() {
         return "-".to_string();
