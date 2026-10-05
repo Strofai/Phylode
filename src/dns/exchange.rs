@@ -224,11 +224,17 @@ fn is_server_failure(result: &Result<DnsResponse, NetError>) -> bool {
 /// with no visible reason.
 const DEFAULT_NEGATIVE_TTL: Duration = Duration::from_secs(60);
 
+/// The longest a device is told to remember "does not exist": the low end of RFC 2308's "one
+/// to three hours", as the cache's own ceiling is.
+/// What breaks if you change it: a newly registered domain stays unreachable on a device for
+/// whatever the upstream asked, a day or more, after the cache here has long forgotten it.
+const MAX_NEGATIVE_TTL: Duration = Duration::from_secs(60 * 60);
+
 /// Translates an upstream's negative response into an answer. The response code decides
 /// between "the name does not exist" and "no records of that type".
 fn negative(empty: &NoRecords) -> Answer {
     let ttl = empty.negative_ttl.map_or(DEFAULT_NEGATIVE_TTL, |seconds| {
-        Duration::from_secs(u64::from(seconds))
+        Duration::from_secs(u64::from(seconds)).min(MAX_NEGATIVE_TTL)
     });
     if empty.response_code == ResponseCode::NXDomain {
         Answer::NameNotFound { ttl }
@@ -291,6 +297,20 @@ mod tests {
         assert!(matches!(
             negative(&empty_response(ResponseCode::NoError, Some(30))),
             Answer::NoRecordsOfType { .. }
+        ));
+    }
+
+    /// Should change: a negative time longer than an hour is cut to an hour.
+    /// Should not change: shorter ones pass through as given.
+    #[test]
+    fn a_negative_answer_is_remembered_for_at_most_an_hour() {
+        assert!(matches!(
+            negative(&empty_response(ResponseCode::NXDomain, Some(86_400))),
+            Answer::NameNotFound { ttl } if ttl == Duration::from_secs(3600)
+        ));
+        assert!(matches!(
+            negative(&empty_response(ResponseCode::NoError, Some(900))),
+            Answer::NoRecordsOfType { ttl } if ttl == Duration::from_secs(900)
         ));
     }
 

@@ -17,6 +17,9 @@ use std::time::Duration;
 
 use hickory_proto::rr::{RData, Record, RecordType as WireRecordType};
 
+/// The longest TTL handed to a device: one day; see [`Records::from_wire`].
+const MAX_ANSWER_TTL: u32 = 24 * 60 * 60;
+
 pub use exchange::{Checked, Exchange, ExchangeError, Signature};
 pub use launchd::LaunchdError;
 pub use probe::{ProbeError, self_probe};
@@ -325,7 +328,15 @@ impl Records {
         Self(vec![Record::from_rdata(owner, 300, data)])
     }
 
-    fn from_wire(records: Vec<Record>) -> Self {
+    /// Takes an upstream's records, cutting any TTL above a day down to a day.
+    ///
+    /// What breaks if you change it: devices keep an answer for as long as its TTL says,
+    /// whatever happens here; a week-long TTL means a domain added to a list today stays
+    /// reachable on those devices for a week. A day matches the daily list update.
+    fn from_wire(mut records: Vec<Record>) -> Self {
+        for record in &mut records {
+            record.ttl = record.ttl.min(MAX_ANSWER_TTL);
+        }
         Self(records)
     }
 
@@ -504,6 +515,28 @@ mod tests {
             vec!["tracker.evil.net".to_string()]
         );
         assert!(service_binding(".", true).alias_targets().is_empty());
+    }
+
+    /// Should change: a TTL above a day is cut to a day.
+    /// Should not change: shorter TTLs pass through as given.
+    #[test]
+    fn an_answer_is_kept_by_devices_for_at_most_a_day() {
+        let records = |ttl: u32| {
+            let name: hickory_proto::rr::Name = "example.com.".parse().unwrap();
+            vec![Record::from_rdata(
+                name,
+                ttl,
+                RData::A(hickory_proto::rr::rdata::A::new(93, 184, 216, 34)),
+            )]
+        };
+        assert_eq!(
+            Records::from_wire(records(604_800)).min_ttl(),
+            Some(Duration::from_secs(86_400))
+        );
+        assert_eq!(
+            Records::from_wire(records(300)).min_ttl(),
+            Some(Duration::from_secs(300))
+        );
     }
 
     /// Should change: an internationalized alias target stays in `xn--` punycode, the form
