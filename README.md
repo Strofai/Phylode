@@ -118,8 +118,8 @@ You need an administrator account to change the lists.
 
 ## Turn Phylode off or uninstall it
 
-- `sudo phylode off` sets your Mac's DNS back to automatic. Other devices keep using
-  Phylode until you change your router's settings.
+- `sudo phylode off` puts your Mac's DNS back to what it was before `phylode on`. Other
+  devices keep using Phylode until you change your router's settings.
 - `sudo phylode uninstall` turns Phylode off and removes it. Your settings, lists and
   query journal stay on your Mac.
 

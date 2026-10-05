@@ -103,8 +103,8 @@ phylode block example.com
 
 ## 關閉或解除安裝 Phylode
 
-- `sudo phylode off` 讓你的 Mac 的 DNS 改回自動取得。在你變更路由器設定之前，其他裝置會繼續使用
-  Phylode。
+- `sudo phylode off` 把你的 Mac 的 DNS 改回 `phylode on` 之前的設定。在你變更路由器設定之前，其他
+  裝置會繼續使用 Phylode。
 - `sudo phylode uninstall` 會關閉並移除 Phylode。你的設定、名單和記錄會留在 Mac 上。
 
 ## 遇到問題時

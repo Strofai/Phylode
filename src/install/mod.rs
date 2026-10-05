@@ -96,6 +96,11 @@ pub enum InstallError {
          {path}` shows its owner, mode and any access control entries), then try again"
     )]
     UnprotectedDirectory { path: PathBuf },
+    #[error(
+        "DNS could not be changed on every network service. Changed: {changed}. Not changed: \
+         {failed}. Run the same command again once that is fixed"
+    )]
+    SomeServices { changed: String, failed: String },
 }
 
 /// The folders `install` writes into as root, whose contents the boot service or `sudo
@@ -209,6 +214,9 @@ pub struct SwitchedOn {
 /// Points every network service on this Mac at the gatekeeper, after checking it answers —
 /// pointing DNS at a service that is not answering would leave the Mac unable to resolve
 /// anything.
+///
+/// Each service's DNS servers from before are saved, so `off` can put them back. A service
+/// that cannot be changed does not stop the others; the error afterwards names it.
 pub fn on() -> Result<SwitchedOn, InstallError> {
     require_root()?;
     let config = Config::load(Path::new(CONFIG_PATH)).map_err(|error| InstallError::Config {
@@ -217,10 +225,29 @@ pub fn on() -> Result<SwitchedOn, InstallError> {
     if !answers_within(&config, ANSWER_WAIT) {
         return Err(InstallError::NotAnswering);
     }
+    let saved_path = Path::new(DNS_BEFORE_ON_PATH);
+    let mut saved = read_saved_dns(saved_path);
     let mut services = Vec::new();
+    let mut failed = Vec::new();
     for service in network_services()? {
-        run(NETWORKSETUP, &["-setdnsservers", &service, "127.0.0.1"])?;
-        services.push(service);
+        let switched = run(NETWORKSETUP, &["-getdnsservers", &service]).and_then(|servers| {
+            // Switched on twice, the first `on` already saved what was there before.
+            if !points_at_gatekeeper(&servers) {
+                saved.insert(service.clone(), dns_servers(&servers));
+            }
+            run(NETWORKSETUP, &["-setdnsservers", &service, "127.0.0.1"])
+        });
+        match switched {
+            Ok(_) => services.push(service),
+            Err(error) => failed.push(format!("{service} ({error})")),
+        }
+    }
+    write_saved_dns(saved_path, &saved)?;
+    if !failed.is_empty() {
+        return Err(InstallError::SomeServices {
+            changed: services.join(", "),
+            failed: failed.join("; "),
+        });
     }
     Ok(SwitchedOn {
         services,
@@ -243,19 +270,87 @@ pub fn network_address(config: &Config) -> Option<IpAddr> {
     Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_unspecified())
 }
 
-/// Returns every network service that points at the gatekeeper to automatic DNS. Returns the
-/// services changed; services configured with other resolvers are left alone.
+/// Returns every network service that points at the gatekeeper to the DNS servers it had
+/// before `on` (automatic when none were saved). Returns the services changed; services
+/// configured with other resolvers are left alone.
+///
+/// What breaks if you change it: stop at the first service that fails and the ones after it
+/// keep pointing at a service that `uninstall` is about to remove — those resolve nothing.
 pub fn off() -> Result<Vec<String>, InstallError> {
     require_root()?;
+    let saved_path = Path::new(DNS_BEFORE_ON_PATH);
+    let saved = read_saved_dns(saved_path);
     let mut restored = Vec::new();
+    let mut failed = Vec::new();
     for service in network_services()? {
-        let servers = run(NETWORKSETUP, &["-getdnsservers", &service])?;
-        if points_at_gatekeeper(&servers) {
-            run(NETWORKSETUP, &["-setdnsservers", &service, "empty"])?;
-            restored.push(service);
+        let result = run(NETWORKSETUP, &["-getdnsservers", &service]).and_then(|servers| {
+            if !points_at_gatekeeper(&servers) {
+                return Ok(false);
+            }
+            let before = saved.get(&service).map_or("empty", String::as_str);
+            let mut args = vec!["-setdnsservers", service.as_str()];
+            args.extend(before.split(' '));
+            run(NETWORKSETUP, &args).map(|_| true)
+        });
+        match result {
+            Ok(true) => restored.push(service),
+            Ok(false) => {}
+            Err(error) => failed.push(format!("{service} ({error})")),
         }
     }
+    if !failed.is_empty() {
+        return Err(InstallError::SomeServices {
+            changed: restored.join(", "),
+            failed: failed.join("; "),
+        });
+    }
+    remove_if_present(saved_path)?;
     Ok(restored)
+}
+
+/// Where `on` keeps each network service's DNS servers from before, one `service<TAB>servers`
+/// line each, `empty` meaning automatic.
+const DNS_BEFORE_ON_PATH: &str = "/usr/local/etc/phylode/dns-before-on.tsv";
+
+/// The servers `networksetup -getdnsservers` listed, space-separated, or `empty` for none
+/// (it prints a sentence rather than an empty list).
+///
+/// What breaks if you change it: only addresses may come out of here, since they go back to
+/// `networksetup` as arguments.
+fn dns_servers(output: &str) -> String {
+    let servers: Vec<&str> = output
+        .split_whitespace()
+        .filter(|word| word.parse::<IpAddr>().is_ok())
+        .collect();
+    if servers.is_empty() {
+        "empty".to_string()
+    } else {
+        servers.join(" ")
+    }
+}
+
+/// The saved servers by service. A missing or unreadable file, or a line that is not a
+/// service and addresses, counts as nothing saved: that service goes back to automatic.
+fn read_saved_dns(path: &Path) -> std::collections::BTreeMap<String, String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (service, servers) = line.split_once('\t')?;
+            (dns_servers(servers) == servers).then(|| (service.to_string(), servers.to_string()))
+        })
+        .collect()
+}
+
+fn write_saved_dns(
+    path: &Path,
+    saved: &std::collections::BTreeMap<String, String>,
+) -> Result<(), InstallError> {
+    let text: String = saved
+        .iter()
+        .map(|(service, servers)| format!("{service}\t{servers}\n"))
+        .collect();
+    write_file(path, &text, 0o644, 0, 0)
 }
 
 /// Switches DNS back to automatic, stops and removes both launchd jobs, the updater and the
@@ -655,13 +750,14 @@ fn network_services() -> Result<Vec<String>, InstallError> {
 }
 
 /// Parses `networksetup -listallnetworkservices`: the first line is a notice, a leading `*`
-/// marks a disabled service, and names may contain spaces.
+/// marks a disabled service, and names may contain spaces — even at either end, so they are
+/// kept exactly as listed or `networksetup` cannot find them again.
 fn parse_network_services(output: &str) -> Vec<String> {
     output
         .lines()
         .skip(1)
-        .map(|line| line.strip_prefix('*').unwrap_or(line).trim().to_string())
-        .filter(|name| !name.is_empty())
+        .map(|line| line.strip_prefix('*').unwrap_or(line).to_string())
+        .filter(|name| !name.trim().is_empty())
         .collect()
 }
 
@@ -673,6 +769,47 @@ fn points_at_gatekeeper(servers: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Should change: what `networksetup -getdnsservers` printed becomes addresses, or
+    /// `empty` for its "none set" sentence; a saved file round-trips.
+    /// Should not change: anything that is not an address is never kept, so a tampered file
+    /// cannot slip other arguments to `networksetup`.
+    #[test]
+    fn dns_servers_from_before_are_saved_and_read_back() {
+        assert_eq!(
+            dns_servers("192.0.2.53\n2001:db8::53\n"),
+            "192.0.2.53 2001:db8::53"
+        );
+        assert_eq!(
+            dns_servers("There aren't any DNS Servers set on Wi-Fi.\n"),
+            "empty"
+        );
+
+        let path = std::env::temp_dir().join(format!("phylode-dns-{}", std::process::id()));
+        let mut saved = std::collections::BTreeMap::new();
+        saved.insert("Wi-Fi".to_string(), "192.0.2.53 198.51.100.53".to_string());
+        saved.insert(" USB LAN ".to_string(), "empty".to_string());
+        let text: String = saved
+            .iter()
+            .map(|(service, servers)| format!("{service}\t{servers}\n"))
+            .collect();
+        std::fs::write(&path, format!("{text}Ethernet\t-setairportpower on\n")).unwrap();
+        assert_eq!(read_saved_dns(&path), saved);
+        let _ = std::fs::remove_file(&path);
+        assert!(read_saved_dns(&path).is_empty());
+    }
+
+    /// Should change: a service name keeps spaces at either end, or `networksetup` cannot find
+    /// it again.
+    /// Should not change: the notice line is skipped and a disabled service loses its `*`.
+    #[test]
+    fn network_service_names_are_kept_exactly() {
+        let output = "An asterisk (*) denotes that a network service is disabled.\nWi-Fi\n*Thunderbolt Bridge\n USB LAN \n\n";
+        assert_eq!(
+            parse_network_services(output),
+            ["Wi-Fi", "Thunderbolt Bridge", " USB LAN "]
+        );
+    }
 
     #[test]
     fn the_next_id_is_free_for_both_accounts_and_groups() {

@@ -222,6 +222,8 @@ jobs:
         # A negated command (! cmd) never fails a step under set -e, so each check is explicit.
         run: |
           service=$(networksetup -listallnetworkservices | sed -n 2p)
+          # DNS set by hand before `on` must be what `off` puts back.
+          sudo networksetup -setdnsservers "$service" 1.1.1.1 9.9.9.9
           out=$(sudo phylode on)
           echo "$out"
           echo "$out" | grep -q "Other devices on this network can use it too: set [0-9]" \
@@ -231,9 +233,14 @@ jobs:
           fi
           dig apple.com +short +time=2 | grep -q .
           sudo phylode off
-          if networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'; then
-            echo "::error::off left \"$service\" pointing at the service"; exit 1
+          after=$(networksetup -getdnsservers "$service" | tr '\n' ' ')
+          if [ "$after" != "1.1.1.1 9.9.9.9 " ]; then
+            echo "::error::off did not put back the DNS set by hand (got '$after')"; exit 1
           fi
+          if test -e /usr/local/etc/phylode/dns-before-on.tsv; then
+            echo "::error::off left its saved DNS file behind"; exit 1
+          fi
+          sudo networksetup -setdnsservers "$service" empty
 
       - name: Uninstall restores DNS and leaves nothing running
         run: |

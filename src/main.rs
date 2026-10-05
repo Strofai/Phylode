@@ -37,7 +37,7 @@ const USAGE: &str = "\
 Usage:
   sudo phylode install           install or update the boot service
   sudo phylode on                point this Mac's DNS at it
-  sudo phylode off               put this Mac's DNS back to automatic
+  sudo phylode off               put this Mac's DNS back as it was before on
   sudo phylode uninstall         remove the service (your lists and journal stay)
   phylode allow <domain>         allow a domain
   phylode block <domain>         block a domain
@@ -172,7 +172,7 @@ impl Command {
                 if services.is_empty() {
                     println!("No network service was using Phylode; nothing changed.");
                 } else {
-                    println!("DNS is back to automatic on:");
+                    println!("DNS is back to how it was before phylode on, on:");
                     for service in services {
                         println!("  {service}");
                     }
@@ -180,7 +180,7 @@ impl Command {
             })),
             Self::Uninstall => finish(install::uninstall().map(|restored| {
                 for service in restored {
-                    println!("DNS back to automatic: {service}");
+                    println!("DNS back as it was: {service}");
                 }
                 println!("Removed.\n\n{}", install::leftovers_message());
             })),
