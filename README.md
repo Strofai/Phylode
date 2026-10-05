@@ -142,7 +142,8 @@ browsing history of everyone on your network, and your settings.
   uses). If every upstream server is unreachable, it answers from recent results.
 - **Your query journal stays on your Mac.** Lookups are kept for 10 days and weekly
   summaries for 12 weeks, and a day's lookups take at most 200 MB, so the journal can't
-  fill your disk. Nothing is sent anywhere, and there's no remote access.
+  fill your disk. Every administrator account on the Mac can read it; standard accounts
+  can't. Nothing is sent anywhere, and there's no remote access.
 - **Allowing works right away.** Devices remember a blocked answer for only 2 seconds.
 - **Devices aren't pushed to another DNS server.** Phylode never answers REFUSED, which
   would make devices switch servers and stop being filtered. A device sending too many

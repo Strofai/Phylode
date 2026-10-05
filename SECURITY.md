@@ -39,7 +39,10 @@ There are no releases yet. Only the latest `main` is supported.
   DNS servers, devices may use them instead and skip filtering.
 - **The rate limit counts each source address.** A device that changes its IPv6 address,
   or one that sends packets with forged source addresses, gets a separate allowance for
-  each address it uses.
+  each address it uses. The reverse also holds: a device on the network that forges
+  another's address can use up that device's allowance, leaving it unanswered for the
+  rest of the minute. Apple's hard-coded hosts have an allowance of their own, so they
+  keep resolving.
 - **A failed DNSSEC check is recorded, not blocked.** When the upstream reports that an
   answer's signature did not validate, Phylode still returns the answer, so a domain with
   broken signatures stays reachable, and records it in the query journal. A device that
@@ -47,4 +50,11 @@ There are no releases yet. Only the latest `main` is supported.
 - **Anyone on a served network can use it.** On a shared network, such as a café or a
   hotel, that includes strangers, and their queries are recorded in the query journal.
   Phylode is meant for a Mac that stays on one network; on a laptop that travels, run
-  `sudo phylode uninstall` before joining networks you don't control.
+  `sudo phylode uninstall` before joining networks you don't control. The served ranges
+  include 100.64.0.0/10, which some routers use inside a home; a Mac connected straight to
+  a provider that hands it such an address would also answer that provider's other
+  customers.
+- **The blocklists are trusted as downloaded.** They come over HTTPS from HaGeZi's
+  published mirrors and are checked for size, encoding and entry count, but not against a
+  signature, since none is published. Someone who took over the source could block any
+  domain except Apple's hard-coded hosts; a list can only block, never redirect.
