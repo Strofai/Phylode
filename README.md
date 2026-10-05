@@ -137,8 +137,12 @@ browsing history of everyone on your network, and your settings.
   lookups, or one outside the networks Phylode serves, gets no answer at all.
 - **Your local network stays private.** Answers that point back into your network are
   discarded (DNS rebinding protection), names that exist only on your network are never
-  sent out, and trackers hidden behind an innocent-looking alias (CNAME cloaking) are
-  blocked too.
+  sent out, and trackers hidden behind an innocent-looking alias (CNAME cloaking, or an
+  HTTPS record pointing elsewhere) are blocked too. "Your network" means the private
+  ranges, any `serve_network`, and the IPv6 network your Mac is on, as Apple defines a
+  local network. If a name of your own points at a device at home, such as a
+  remote-access name for a NAS, the weekly summary lists it; add an `internal_domain`
+  line for it to `/usr/local/etc/phylode.conf`.
 - **It looks after itself.** Every 10 seconds, Phylode checks that it's still answering
   and restarts if it isn't. An upstream server that stops responding is tried again and
   returns when it recovers.

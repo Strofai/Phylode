@@ -626,6 +626,9 @@ async fn run(config: Config) -> Result<(), String> {
 
     let cache = Arc::new(Cache::new(config.cache_capacity(), config.stale_max_age()));
     let own_addresses = listener.local_ips();
+    let rebind_guard = RebindGuard::with_internal_domains(config.internal_domains())
+        .counting_as_inside(config.served_networks());
+    spawn_attached_refresh(rebind_guard.clone());
     let gatekeeper = Arc::new(
         Gatekeeper::new(
             allowlist,
@@ -634,7 +637,7 @@ async fn run(config: Config) -> Result<(), String> {
             conductor,
             journal,
             config.block_ttl(),
-            RebindGuard::with_internal_domains(config.internal_domains()),
+            rebind_guard,
         )
         .serving_on(own_addresses)
         .answering(ServedNetworks::new(config.served_networks())),
@@ -642,6 +645,22 @@ async fn run(config: Config) -> Result<(), String> {
     dns::serve(listener, gatekeeper)
         .await
         .map_err(|error| format!("Service stopped: {error}"))
+}
+
+/// How often the rebinding guard re-reads which IPv6 network this Mac is on. A new prefix
+/// from the provider is picked up within this long.
+const ATTACHED_REFRESH: Duration = Duration::from_secs(60);
+
+/// Background task: keeps the rebinding guard's idea of the home IPv6 network current,
+/// starting immediately so the first answers are already judged against it.
+fn spawn_attached_refresh(guard: RebindGuard) {
+    tokio::spawn(async move {
+        let mut ticks = tokio::time::interval(ATTACHED_REFRESH);
+        loop {
+            ticks.tick().await;
+            guard.refresh_attached();
+        }
+    });
 }
 
 /// How long to wait for the journal to flush after a stop signal. launchd waits 20 seconds

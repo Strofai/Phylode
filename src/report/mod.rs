@@ -303,6 +303,10 @@ impl Summary {
             for (domain, count) in sorted_desc(&self.rebind_by_domain).into_iter().take(TOP_N) {
                 out.push_str(&format!("      · {domain}: {count}\n"));
             }
+            out.push_str(
+                "      If one of these is yours, such as a remote-access name for a device at \
+                 home, add `internal_domain = <name>` to the configuration file\n",
+            );
         }
 
         // DNSSEC is in report-only mode, so this reports "how many and which domains"
