@@ -211,21 +211,29 @@ impl Records {
             .collect()
     }
 
-    /// The names this set's CNAMEs point to, normalized exactly as query names are
-    /// ([`Name::from_wire`]: `xn--` punycode, lowercase, no trailing dot).
-    /// The gatekeeper matches these against the blocklist to catch CNAME cloaking: a
-    /// first-party-looking subdomain that actually resolves to a tracker.
+    /// Every other name this set sends a device to: CNAME targets, and the target name of
+    /// HTTPS/SVCB records (RFC 9460 §2.5 — with `ipv4hint`/`ipv6hint` a device can connect
+    /// to that endpoint without ever looking its name up). Normalized exactly as query names
+    /// are ([`Name::from_wire`]: `xn--` punycode, lowercase, no trailing dot).
+    /// The gatekeeper matches these against the blocklist to catch cloaking: a
+    /// first-party-looking subdomain that actually leads to a tracker.
     ///
-    /// What breaks if you change it: the library's `to_string` decodes punycode to Unicode,
-    /// which no blocklist entry is written in, so an internationalized tracker behind an alias
-    /// would pass.
-    pub fn cname_targets(&self) -> Vec<String> {
+    /// A target of `.` means "this same name" (RFC 9460 §2.5.2) and is left out.
+    ///
+    /// What breaks if you change it: miss a type and an alias of that type walks past the
+    /// blocklist. The library's `to_string` decodes punycode to Unicode, which no blocklist
+    /// entry is written in, so an internationalized tracker behind an alias would pass.
+    pub fn alias_targets(&self) -> Vec<String> {
         self.0
             .iter()
             .filter_map(|record| match &record.data {
-                RData::CNAME(target) => Name::from_wire(&target.0).map(|name| name.0),
+                RData::CNAME(target) => Some(&target.0),
+                RData::HTTPS(https) => Some(&https.0.target_name),
+                RData::SVCB(svcb) => Some(&svcb.target_name),
                 _ => None,
             })
+            .filter(|target| !target.is_root())
+            .filter_map(|target| Name::from_wire(target).map(|name| name.0))
             .collect()
     }
 
@@ -274,6 +282,30 @@ impl Records {
         )];
         records.extend(Self::from_addresses(&Name::parse(target), ttl, &[address]).0);
         Self(records)
+    }
+
+    /// Test only: an HTTPS (or, with `https` false, SVCB) record for `name` sending devices
+    /// to `target` (`.` for the name itself) with a public `ipv4hint` — the shape of
+    /// cloaking through service binding.
+    #[cfg(test)]
+    pub fn with_service_binding(name: &Name, target: &str, https: bool) -> Self {
+        use hickory_proto::rr::rdata::svcb::{IpHint, SVCB, SvcParamKey, SvcParamValue};
+        use hickory_proto::rr::rdata::{A, HTTPS};
+
+        let owner: hickory_proto::rr::Name =
+            format!("{name}.").parse().expect("test names should parse");
+        let hint = SvcParamValue::Ipv4Hint(IpHint(vec![A::new(203, 0, 113, 7)]));
+        let svcb = SVCB::new(
+            1,
+            target.parse().expect("test names should parse"),
+            vec![(SvcParamKey::Ipv4Hint, hint)],
+        );
+        let data = if https {
+            RData::HTTPS(HTTPS(svcb))
+        } else {
+            RData::SVCB(svcb)
+        };
+        Self(vec![Record::from_rdata(owner, 300, data)])
     }
 
     fn from_wire(records: Vec<Record>) -> Self {
@@ -433,9 +465,28 @@ mod tests {
             "1.2.3.4".parse().unwrap(),
         );
         assert_eq!(
-            records.cname_targets(),
+            records.alias_targets(),
             vec!["tracker.evil.net".to_string()]
         );
+    }
+
+    fn service_binding(target: &str, https: bool) -> Records {
+        Records::with_service_binding(&Name::parse("shop.example.com"), target, https)
+    }
+
+    /// Should change: the endpoint an HTTPS or SVCB record points at is an alias target.
+    /// Should not change: a target of `.` (the record's own name) is not one.
+    #[test]
+    fn service_binding_targets_are_alias_targets() {
+        assert_eq!(
+            service_binding("Tracker.Evil.NET.", true).alias_targets(),
+            vec!["tracker.evil.net".to_string()]
+        );
+        assert_eq!(
+            service_binding("tracker.evil.net.", false).alias_targets(),
+            vec!["tracker.evil.net".to_string()]
+        );
+        assert!(service_binding(".", true).alias_targets().is_empty());
     }
 
     /// Should change: an internationalized alias target stays in `xn--` punycode, the form
@@ -449,6 +500,6 @@ mod tests {
             "XN--FIQ228C.com",
             "1.2.3.4".parse().unwrap(),
         );
-        assert_eq!(records.cname_targets(), vec!["xn--fiq228c.com".to_string()]);
+        assert_eq!(records.alias_targets(), vec!["xn--fiq228c.com".to_string()]);
     }
 }

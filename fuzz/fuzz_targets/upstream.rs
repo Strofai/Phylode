@@ -28,7 +28,7 @@ fuzz_target!(|data: &[u8]| {
     let addresses = records.addresses();
     let guard = RebindGuard::with_internal_domains(["home.arpa"]);
     let _ = guard.inspect("example.com", &addresses);
-    for target in records.cname_targets() {
+    for target in records.alias_targets() {
         let _ = guard.inspect(&target, &addresses);
     }
 

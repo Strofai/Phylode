@@ -192,10 +192,10 @@ impl Gatekeeper {
         }
     }
 
-    /// The first CNAME target in an answer that is on the blocklist and has not been allowed
+    /// The first alias target in an answer that is on the blocklist and has not been allowed
     /// by the user.
     fn cloaked_target(&self, records: &crate::dns::Records) -> Option<String> {
-        records.cname_targets().into_iter().find(|target| {
+        records.alias_targets().into_iter().find(|target| {
             self.blocklist.lookup(target) == Verdict::Blocked && !self.allowlist.allows(target)
         })
     }
@@ -732,6 +732,38 @@ mod tests {
             ),
             "once the user allows the alias target, it must stop being a reason to block"
         );
+    }
+
+    /// Should change: an HTTPS or SVCB record sending devices to a blocklisted endpoint is
+    /// blocked, as a CNAME to it is.
+    /// Should not change: a record whose endpoint is the name itself (`.`) answers as usual.
+    #[tokio::test]
+    async fn a_service_binding_to_a_blocklisted_endpoint_is_blocked() {
+        let blocklist = Blocklist::new();
+        blocklist.load_from_str("evil.net\n");
+        let (gatekeeper, cache) = parts(blocklist);
+        let device: IpAddr = "192.168.0.20".parse().unwrap();
+        for (name, target, https, blocked) in [
+            ("shop.example.com", "tracker.evil.net.", true, true),
+            ("api.example.com", "tracker.evil.net.", false, true),
+            ("www.example.com", ".", true, false),
+        ] {
+            let asked = Query::new(crate::dns::Name::parse(name), RecordType::Https);
+            cache.insert(
+                asked.clone(),
+                Cached::Records(crate::dns::Records::with_service_binding(
+                    asked.name(),
+                    target,
+                    https,
+                )),
+            );
+            let response = gatekeeper.respond(&asked, device).await;
+            assert_eq!(
+                matches!(response, Response::Blocked { .. }),
+                blocked,
+                "{name} -> {target}"
+            );
+        }
     }
 
     /// Should change: an alias pointing at a listed internationalized domain is blocked, as a
