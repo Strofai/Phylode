@@ -61,6 +61,14 @@ pub enum WriterError {
         #[source]
         source: std::io::Error,
     },
+    #[error(
+        "journal directory {path} can be read by other accounts and could not be restricted: {source}"
+    )]
+    OpenDirectory {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("could not start the journal writer thread: {source}")]
     SpawnThread {
         #[source]
@@ -88,12 +96,32 @@ pub fn spawn(
             path: directory.clone(),
             source,
         })?;
+    restrict(&directory).map_err(|source| WriterError::OpenDirectory {
+        path: directory.clone(),
+        source,
+    })?;
 
     std::thread::Builder::new()
         .name("phylode-journal".to_string())
         .spawn(move || run(receiver, directory, retention_days, zone, dropped))
         .map(|_| ())
         .map_err(|source| WriterError::SpawnThread { source })
+}
+
+/// Takes away any permission beyond [`DIR_MODE`] from a directory that already existed:
+/// creating applies the mode only to a new directory.
+///
+/// What breaks if you change it: a `journal_dir` pointing at an existing open folder would
+/// show every account the journal's file names. When the service cannot tighten it (it does
+/// not own the folder), it runs without a journal rather than writing into the open.
+fn restrict(directory: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = std::fs::metadata(directory)?.permissions().mode() & 0o7777;
+    if mode & !DIR_MODE == 0 {
+        return Ok(());
+    }
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode & DIR_MODE))
 }
 
 fn run(
@@ -489,6 +517,24 @@ mod tests {
             text.lines()
                 .all(|line| line.contains("\trecords-dropped\t"))
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should change: an existing folder open to other accounts loses those permissions.
+    /// Should not change: a folder already tighter than 750 is left as it is.
+    #[test]
+    fn an_existing_open_journal_folder_is_restricted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("phylode-restrict-{}", std::process::id()));
+        for (before, after) in [(0o777, 0o750), (0o755, 0o750), (0o700, 0o700)] {
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(before)).unwrap();
+            restrict(&dir).unwrap();
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, after, "{before:o} became {mode:o}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
