@@ -38,6 +38,14 @@ pub mod fuzz;
 /// without a limit, opening many connections that send nothing exhausts the connection count.
 const TCP_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a TCP connection may stay open in all, however busy. Ours, with no industry
+/// source: a device needs TCP only for the odd truncated answer, done in a second or two.
+///
+/// What breaks if you change it: the idle limit alone resets with every query, so a device
+/// asking once every nine seconds keeps its connections, and three devices doing it hold the
+/// whole pool; other devices' truncated answers then fail.
+const TCP_MAX_LIFETIME: Duration = Duration::from_secs(60);
+
 /// The retry and expire fields, in seconds, of the SOA in a blocked response.
 /// These do not affect how soon a device asks again (the TTL decides that); they only give the
 /// response the shape RFC 2308 requires.
@@ -198,7 +206,7 @@ pub async fn serve<R: Responder>(listener: Listener, responder: Arc<R>) -> Resul
     for tcp in listener.tcp {
         let (handler, slots) = (Arc::clone(&handler), Arc::clone(&slots));
         loops.spawn(async move {
-            serve_tcp(tcp, handler, slots).await;
+            serve_tcp(tcp, handler, slots, TCP_MAX_LIFETIME).await;
             Err(NetError::from("a TCP listener stopped"))
         });
     }
@@ -294,6 +302,7 @@ async fn serve_tcp<R: Responder>(
     listener: TcpListener,
     handler: Arc<Handler<R>>,
     slots: Arc<TcpSlots>,
+    lifetime: Duration,
 ) {
     loop {
         let (socket, src) = match listener.accept().await {
@@ -322,18 +331,21 @@ async fn serve_tcp<R: Responder>(
                 TCP_RESPONSE_BUFFER,
             );
             let mut messages = TimeoutStream::new(stream, TCP_IDLE_TIMEOUT);
-            while let Some(Ok(message)) = messages.next().await {
-                let (bytes, from) = message.into_parts();
-                // A packet that does not parse ends the connection: untrusted input gets no
-                // response and never panics.
-                let Ok(request) = Request::from_bytes(bytes, from, Protocol::Tcp) else {
-                    return;
-                };
-                let reply_to = ResponseHandle::new(from, sender.clone(), Protocol::Tcp);
-                handler
-                    .handle_request::<_, TokioTime>(&request, reply_to)
-                    .await;
-            }
+            let connection = async {
+                while let Some(Ok(message)) = messages.next().await {
+                    let (bytes, from) = message.into_parts();
+                    // A packet that does not parse ends the connection: untrusted input gets
+                    // no response and never panics.
+                    let Ok(request) = Request::from_bytes(bytes, from, Protocol::Tcp) else {
+                        return;
+                    };
+                    let reply_to = ResponseHandle::new(from, sender.clone(), Protocol::Tcp);
+                    handler
+                        .handle_request::<_, TokioTime>(&request, reply_to)
+                        .await;
+                }
+            };
+            let _ = tokio::time::timeout(lifetime, connection).await;
         });
     }
 }
@@ -765,6 +777,7 @@ mod tests {
             listener,
             Arc::new(Handler { responder }),
             TcpSlots::new(total, per_source),
+            TCP_MAX_LIFETIME,
         ));
         addr
     }
@@ -1072,6 +1085,7 @@ mod tests {
             listener,
             Arc::new(Handler { responder }),
             TcpSlots::new(2, 2),
+            TCP_MAX_LIFETIME,
         ));
 
         let mut outside = Vec::new();
@@ -1121,6 +1135,34 @@ mod tests {
             ask(&mut fourth).await,
             "a closed connection must return its slot"
         );
+    }
+
+    /// Should change: a connection that keeps asking is still closed once its lifetime is up,
+    /// and its slot comes back.
+    /// Should not change: within the lifetime, repeated queries on it are answered.
+    #[tokio::test]
+    async fn a_busy_tcp_connection_is_closed_when_its_lifetime_is_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(serve_tcp(
+            listener,
+            Arc::new(Handler {
+                responder: Arc::new(AlwaysNotFound),
+            }),
+            TcpSlots::new(1, 1),
+            Duration::from_millis(600),
+        ));
+
+        let mut busy = tokio::net::TcpStream::connect(addr).await.unwrap();
+        for _ in 0..3 {
+            assert!(ask(&mut busy).await, "answered within the lifetime");
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(!ask(&mut busy).await, "closed once the lifetime is up");
+
+        let mut next = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert!(ask(&mut next).await, "the slot came back");
     }
 
     #[tokio::test]
