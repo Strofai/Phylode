@@ -57,6 +57,16 @@ jobs:
           echo "install took $(( $(date +%s) - start ))s, including the list download and the first answer"
           /usr/libexec/ApplicationFirewall/socketfilterfw --listapps | grep -q /usr/local/bin/phylode \
             || { echo "::error::install did not register with the firewall"; exit 1; }
+          # newsyslog reads the rotation file and would rotate each service log.
+          rotation=$(sudo newsyslog -nv -f /etc/newsyslog.d/phylode.conf 2>&1) \
+            || { echo "$rotation"; echo "::error::newsyslog cannot read the rotation file"; exit 1; }
+          echo "$rotation"
+          echo "$rotation" | grep -q "/var/log/phylode/stderr.log" \
+            || { echo "::error::newsyslog does not look at the service log"; exit 1; }
+          id=$(dscl . -read /Users/_phylode UniqueID | awk '{print $2}')
+          echo "service account ID: $id"
+          [ "$id" -ge 400 ] && [ "$id" -le 499 ] \
+            || { echo "::error::the service account took ID $id, outside 400-499"; exit 1; }
 
       - name: Other devices can use it through this Mac's network address
         run: |
@@ -250,7 +260,7 @@ jobs:
           if pgrep -x phylode; then echo "::error::the service is still running"; exit 1; fi
           for f in /usr/local/bin/phylode /Library/LaunchDaemons/com.Phylode.gatekeeper.plist \
                    /Library/LaunchDaemons/com.Phylode.blocklist-update.plist \
-                   /usr/local/libexec/phylode-update-lists; do
+                   /usr/local/libexec/phylode-update-lists /etc/newsyslog.d/phylode.conf; do
             if test -e "$f"; then echo "::error::left behind: $f"; exit 1; fi
           done
           if networksetup -getdnsservers "$service" | grep -q '^127\.0\.0\.1$'; then

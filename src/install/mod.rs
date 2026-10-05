@@ -27,6 +27,7 @@ const UPDATE_LABEL: &str = "com.Phylode.blocklist-update";
 const GATEKEEPER_PLIST_PATH: &str = "/Library/LaunchDaemons/com.Phylode.gatekeeper.plist";
 const UPDATE_PLIST_PATH: &str = "/Library/LaunchDaemons/com.Phylode.blocklist-update.plist";
 const UPDATE_SCRIPT_PATH: &str = "/usr/local/libexec/phylode-update-lists";
+const NEWSYSLOG_PATH: &str = "/etc/newsyslog.d/phylode.conf";
 const BINARY_PATH: &str = "/usr/local/bin/phylode";
 const ETC_DIR: &str = "/usr/local/etc/phylode";
 const LISTS_DIR: &str = "/usr/local/etc/phylode/lists";
@@ -36,6 +37,7 @@ const GATEKEEPER_PLIST: &str = include_str!("../../deploy/com.Phylode.gatekeeper
 const UPDATE_PLIST: &str = include_str!("../../deploy/com.Phylode.blocklist-update.plist");
 const UPDATE_SCRIPT: &str = include_str!("../../deploy/update-blocklists.sh");
 const DEFAULT_CONFIG: &str = include_str!("../../deploy/phylode.conf");
+const NEWSYSLOG_CONFIG: &str = include_str!("../../deploy/phylode.newsyslog.conf");
 
 /// How long `install` waits for the first list download before starting the service anyway.
 /// Both lists normally arrive in a few seconds; a slow network should not block installing.
@@ -113,7 +115,8 @@ pub enum InstallError {
 
 /// The folders `install` writes into as root, whose contents the boot service or `sudo
 /// phylode` later run. Adding a path to the constants above means adding its folder here.
-const PROTECTED_DIRS: [&str; 5] = [
+const PROTECTED_DIRS: [&str; 6] = [
+    "/etc/newsyslog.d",
     "/usr/local/bin",
     "/usr/local/etc",
     "/usr/local/libexec",
@@ -150,6 +153,8 @@ pub fn install() -> Result<(), InstallError> {
     // Group admin, so `phylode report` needs no sudo; no one else can read it, because the
     // journal is a complete browsing history.
     make_dir(Path::new(LOG_DIR), 0o750, service_uid, admin_gid)?;
+    // macOS newsyslog keeps the service logs from growing without end.
+    write_file(Path::new(NEWSYSLOG_PATH), NEWSYSLOG_CONFIG, 0o644, 0, 0)?;
 
     if Path::new(CONFIG_PATH).exists() {
         step(&format!("Keeping the existing configuration {CONFIG_PATH}"));
@@ -397,6 +402,7 @@ pub fn uninstall() -> Result<Vec<String>, InstallError> {
         GATEKEEPER_PLIST_PATH,
         UPDATE_PLIST_PATH,
         UPDATE_SCRIPT_PATH,
+        NEWSYSLOG_PATH,
         BINARY_PATH,
     ] {
         remove_if_present(Path::new(path))?;

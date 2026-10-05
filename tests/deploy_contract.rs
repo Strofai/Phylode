@@ -152,3 +152,31 @@ fn the_list_update_reads_the_configuration_the_installer_writes() {
         "the list update is not given {path}"
     );
 }
+
+#[test]
+fn every_log_the_plists_write_is_rotated() {
+    // A log launchd writes that newsyslog does not know about grows without end.
+    let rotation = deploy_file("phylode.newsyslog.conf");
+    let rotated: Vec<&str> = rotation
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
+    for plist in [
+        "com.Phylode.gatekeeper.plist",
+        "com.Phylode.blocklist-update.plist",
+    ] {
+        let text = deploy_file(plist);
+        let paths = text
+            .split("<string>")
+            .filter_map(|rest| rest.split_once("</string>"))
+            .map(|(value, _)| value)
+            .filter(|value| value.starts_with("/var/log/"));
+        for path in paths {
+            assert!(
+                rotated.contains(&path),
+                "{plist} writes {path}, which is not rotated"
+            );
+        }
+    }
+}
