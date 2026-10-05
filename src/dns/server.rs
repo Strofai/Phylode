@@ -187,25 +187,32 @@ impl Listener {
 ///
 /// Both UDP and TCP are received here rather than by the library: its UDP loop answers a
 /// datagram it cannot parse before any admission check, and its TCP path has no total
-/// connection cap. Returns only when a UDP socket stops, so the supervisor restarts the service.
+/// connection cap. Returns only when a receive loop stops, so the supervisor restarts the service.
 pub async fn serve<R: Responder>(listener: Listener, responder: Arc<R>) -> Result<(), NetError> {
     let handler = Arc::new(Handler { responder });
+    // Every receive loop is watched: when any of them ends, so does the service, and launchd
+    // starts it again. What breaks if you change it: the self health check only probes UDP,
+    // so a TCP loop that died unwatched would leave truncated answers failing for good.
+    let mut loops = JoinSet::new();
     let slots = TcpSlots::new(MAX_TCP_CONNECTIONS, MAX_TCP_PER_SOURCE);
     for tcp in listener.tcp {
-        tokio::spawn(serve_tcp(tcp, Arc::clone(&handler), Arc::clone(&slots)));
+        let (handler, slots) = (Arc::clone(&handler), Arc::clone(&slots));
+        loops.spawn(async move {
+            serve_tcp(tcp, handler, slots).await;
+            Err(NetError::from("a TCP listener stopped"))
+        });
     }
     let udp_slots = Arc::new(Semaphore::new(MAX_UDP_IN_PROGRESS));
-    let mut udp = JoinSet::new();
     for socket in listener.udp {
-        udp.spawn(serve_udp(
+        loops.spawn(serve_udp(
             socket,
             Arc::clone(&handler),
             Arc::clone(&udp_slots),
         ));
     }
-    match udp.join_next().await {
+    match loops.join_next().await {
         Some(Ok(stopped)) => stopped,
-        Some(Err(_)) => Err(NetError::from("the UDP receive task stopped unexpectedly")),
+        Some(Err(_)) => Err(NetError::from("a receive loop stopped unexpectedly")),
         None => std::future::pending().await,
     }
 }

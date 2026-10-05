@@ -326,6 +326,10 @@ fn record_type_name(record_type: RecordType) -> Cow<'static, str> {
 
 impl Responder for Gatekeeper {
     async fn respond(&self, query: &Query, client: IpAddr) -> Response {
+        // A device reaching an IPv6 socket over IPv4 arrives as `::ffff:a.b.c.d`. Judged as
+        // written, it would get a second rate allowance and loopback would lose its exemption.
+        let client = client.to_canonical();
+
         // The own-probe check below comes first on purpose: a probe from this Mac's own
         // address must be answered even when that address is outside the served networks, or
         // the health check restarts a healthy service.
@@ -424,7 +428,7 @@ impl Responder for Gatekeeper {
     }
 
     fn admits(&self, client: IpAddr) -> bool {
-        self.admit(client, false)
+        self.admit(client.to_canonical(), false)
     }
 }
 
@@ -732,6 +736,41 @@ mod tests {
             ),
             "once the user allows the alias target, it must stop being a reason to block"
         );
+    }
+
+    /// Should change: a device's IPv4 address written as IPv6 (`::ffff:a.b.c.d`) shares that
+    /// address's rate allowance, and mapped loopback keeps loopback's exemption.
+    /// Should not change: a different device still has its own allowance.
+    #[tokio::test]
+    async fn an_ipv4_address_written_as_ipv6_is_the_same_device() {
+        let blocklist = Blocklist::new();
+        blocklist.load_from_str("ads.example.com\n");
+        let (gatekeeper, _) = parts(blocklist);
+        let blocked = query("ads.example.com");
+        let device: IpAddr = "192.168.0.20".parse().unwrap();
+        for _ in 0..crate::policy::ratelimit::MAX_PER_WINDOW {
+            gatekeeper.respond(&blocked, device).await;
+        }
+        let mapped: IpAddr = "::ffff:192.168.0.20".parse().unwrap();
+        assert!(matches!(
+            gatekeeper.respond(&blocked, mapped).await,
+            Response::Ignored
+        ));
+        assert!(!gatekeeper.admits(mapped));
+        let other: IpAddr = "192.168.0.21".parse().unwrap();
+        assert!(matches!(
+            gatekeeper.respond(&blocked, other).await,
+            Response::Blocked { .. }
+        ));
+
+        let mapped_loopback: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        for _ in 0..=crate::policy::ratelimit::MAX_PER_WINDOW {
+            gatekeeper.respond(&blocked, mapped_loopback).await;
+        }
+        assert!(matches!(
+            gatekeeper.respond(&blocked, mapped_loopback).await,
+            Response::Blocked { .. }
+        ));
     }
 
     /// Should change: an HTTPS or SVCB record sending devices to a blocklisted endpoint is

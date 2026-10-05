@@ -861,9 +861,12 @@ async fn reload_allowlist(allowlist: &Allowlist, path: &Path, journal: Option<&J
             Allowlist::hard_rules().len()
         ),
         Err(error) => {
+            // A failed read leaves the entries already loaded in place; at start-up there are
+            // none yet.
             eprintln!(
-                "Warning: the allowlist could not be read; only the hardcoded Apple rules \
-                 apply: {error}"
+                "Warning: the allowlist could not be read, so the entries loaded before stay in \
+                 effect (none if the service just started) alongside the hardcoded Apple rules: \
+                 {error}"
             );
             if let Some(journal) = journal.as_ref() {
                 journal.event(EventKind::AllowlistFailed, error.to_string());

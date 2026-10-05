@@ -25,6 +25,11 @@ const DEFAULT_CACHE_CAPACITY: usize = 20_000;
 const DEFAULT_STALE_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 const DEFAULT_JOURNAL_RETENTION_DAYS: u32 = 10;
 
+/// The longest the journal may be kept: ten years. What breaks if you change it: the date
+/// arithmetic that finds expired days cannot reach far beyond this, and a value it cannot
+/// handle stops the journal writer for good.
+const MAX_JOURNAL_RETENTION_DAYS: u32 = 3650;
+
 /// Why the configuration file cannot be used.
 ///
 /// What breaks if you change it: messages name the line and the setting, never what is written
@@ -353,7 +358,15 @@ impl Config {
 
             match key {
                 "listen" => listen.push(value.parse().map_err(|_| bad())?),
-                "upstream" => upstreams.push(Upstream::parse(value).ok_or_else(bad)?),
+                "upstream" => {
+                    let upstream = Upstream::parse(value).ok_or_else(bad)?;
+                    // A repeated line is not a second server: when it fails, every query waits
+                    // for it twice before the next real one is tried.
+                    if upstreams.contains(&upstream) {
+                        return Err(bad());
+                    }
+                    upstreams.push(upstream);
+                }
                 "blocklist" => blocklists.push(PathBuf::from(value)),
                 "allowlist" => allowlist = Some(PathBuf::from(value)),
                 "user_blocklist" => user_blocklist = Some(PathBuf::from(value)),
@@ -362,7 +375,11 @@ impl Config {
                 }
                 "journal_dir" => journal_dir = PathBuf::from(value),
                 "journal_retention_days" => {
-                    journal_retention_days = value.parse().map_err(|_| bad())?;
+                    journal_retention_days = value
+                        .parse()
+                        .ok()
+                        .filter(|days| *days <= MAX_JOURNAL_RETENTION_DAYS)
+                        .ok_or_else(bad)?;
                 }
                 "cache_capacity" => cache_capacity = value.parse().map_err(|_| bad())?,
                 "stale_max_age_secs" => {
@@ -447,6 +464,36 @@ mod tests {
         assert_eq!(config.block_ttl(), DEFAULT_BLOCK_TTL);
         assert_eq!(config.stale_max_age(), DEFAULT_STALE_MAX_AGE);
         assert_eq!(config.journal_retention_days(), 10);
+    }
+
+    /// Should change: a retention past ten years, and an upstream listed twice, are refused.
+    /// Should not change: ten years exactly, and two different upstreams, are accepted.
+    #[test]
+    fn retention_is_bounded_and_upstreams_are_not_repeated() {
+        let with = |extra: &str| Config::parse(&format!("{MINIMAL}\n{extra}"));
+        assert_eq!(
+            with("journal_retention_days = 3650")
+                .unwrap()
+                .journal_retention_days(),
+            3650
+        );
+        for days in ["3651", "4294967295"] {
+            assert!(matches!(
+                with(&format!("journal_retention_days = {days}")),
+                Err(ConfigError::BadValue { .. })
+            ));
+        }
+        assert!(matches!(
+            with(r#"upstream = "tls 1.1.1.1 cloudflare-dns.com""#),
+            Err(ConfigError::BadValue { line: 5, .. })
+        ));
+        assert_eq!(
+            with(r#"upstream = "https 9.9.9.9 dns.quad9.net""#)
+                .unwrap()
+                .upstreams()
+                .len(),
+            2
+        );
     }
 
     /// Should change: each of the three tiers is read from `protection`.

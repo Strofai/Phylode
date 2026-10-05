@@ -15,7 +15,8 @@
 /// them.
 ///
 /// Sources: RFC 6303 (private-address reverse lookups), RFC 7793 (100.64/10), RFC 6761 (localhost, invalid, test),
-/// RFC 6762 (local; and home, lan, corp from appendix G), RFC 8375 (home.arpa), and
+/// RFC 6762 (local; and home, lan, corp from appendix G), RFC 8375 (home.arpa), RFC 7686
+/// (onion), RFC 9476 (alt), and
 /// `internal`, which ICANN reserved for private networks.
 const LOCAL_ZONES: &[&str] = &[
     "local",
@@ -27,6 +28,8 @@ const LOCAL_ZONES: &[&str] = &[
     "home",
     "lan",
     "corp",
+    "onion",
+    "alt",
     // IPv4 reverse: 10/8, 127/8, 169.254/16, 192.168/16, 0/8, test networks, broadcast
     "10.in-addr.arpa",
     "127.in-addr.arpa",
@@ -95,6 +98,8 @@ mod tests {
             "1.0.0.127.in-addr.arpa",
             "4.3.2.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.e.f.ip6.arpa",
             "HOME.ARPA.",
+            "duckduckgogg42xjoc72x3sjasowoarfbgcmvfimaftt6twagswzczad.onion",
+            "wallet.alt",
         ] {
             assert!(
                 is_local(name),
@@ -111,6 +116,8 @@ mod tests {
             "example.com",
             "localhost.example.com",
             "home.example.com",
+            "onion.example.com",
+            "alt.example.com",
             "8.8.8.8.in-addr.arpa",
             "1.1.15.172.in-addr.arpa",
             "1.1.32.172.in-addr.arpa",
