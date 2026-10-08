@@ -134,9 +134,15 @@ impl Gatekeeper {
     /// Negative answers (name does not exist, no records of that type) are cached too;
     /// SERVFAIL is not ([`Cached`] has no variant for it).
     ///
-    /// Answers whose signatures the upstream flagged are served as usual (report-only mode)
-    /// but **never cached**: when this later becomes enforcing, stale answers must not keep
-    /// being served.
+    /// An answer whose signature failed upstream is refused with SERVFAIL, as Cloudflare's
+    /// 1.1.1.1 refuses it (Extended DNS Error 6, "DNSSEC Bogus") — unless the user allowed the
+    /// domain, so a wrongly signed
+    /// site can be let through at once. Either way it is **never cached**, so taking the domain
+    /// off the allowlist takes effect immediately.
+    ///
+    /// What breaks if you change it: serving the answer hands every device whatever an
+    /// attacker between the upstream and that domain's servers forged — the upstream's
+    /// signature check is the only cryptographic check these answers get.
     fn deliver(
         &self,
         query: &Query,
@@ -144,7 +150,10 @@ impl Gatekeeper {
         write: CacheWrite,
         signature: Signature,
     ) -> (Response, Disposition) {
-        let disposition = disposition_with(write, signature);
+        if signature == Signature::Bogus && !self.allowlist.allows(query.name().as_str()) {
+            return (Response::Failure, Disposition::DnssecBogus);
+        }
+        let disposition = disposition_for(write);
         let cacheable = write == CacheWrite::Allowed && signature == Signature::NotFlagged;
         match answer {
             Answer::Records(records) => {
@@ -278,7 +287,9 @@ fn reason_for(disposition: Disposition, from_caller: Cow<'static, str>) -> Cow<'
         Disposition::ServFail => {
             "upstream returned a failure (usually that domain's own name servers)"
         }
-        Disposition::DnssecBogus => "signature failed to validate; allowed and recorded per config",
+        Disposition::DnssecBogus => {
+            "signature failed to validate upstream; refused (phylode allow lets this domain through)"
+        }
         Disposition::Blocked
         | Disposition::Allowed
         | Disposition::FailOpen
@@ -297,17 +308,9 @@ fn response_of(cached: Cached) -> Response {
     }
 }
 
-/// Which category an allowed answer is journalled as. A fail-open allow wins: item 6 of the
-/// weekly summary ("was there a window with no protection?") depends on it, and if it gets
-/// overwritten that window disappears silently.
-fn disposition_with(write: CacheWrite, signature: Signature) -> Disposition {
-    match (write, signature) {
-        (CacheWrite::Forbidden, _) => Disposition::FailOpen,
-        (CacheWrite::Allowed, Signature::Bogus) => Disposition::DnssecBogus,
-        (CacheWrite::Allowed, Signature::NotFlagged) => Disposition::Allowed,
-    }
-}
-
+/// Which category an answer handed to the device is journalled as. A fail-open allow must
+/// stay fail-open: item 6 of the weekly summary ("was there a window with no protection?")
+/// depends on it, and if it gets overwritten that window disappears silently.
 fn disposition_for(write: CacheWrite) -> Disposition {
     match write {
         CacheWrite::Allowed => Disposition::Allowed,
@@ -984,6 +987,48 @@ mod tests {
         (q, Answer::Records(records))
     }
 
+    /// Should change: an answer whose signature failed upstream is refused with SERVFAIL, as
+    /// Cloudflare's 1.1.1.1 refuses it, and journalled as such.
+    /// Should not change: a domain the user allowed still gets its answer, so a wrongly signed
+    /// site can be let through at once; neither is cached, and a clean answer is served.
+    #[test]
+    fn an_answer_that_failed_its_signature_is_refused_unless_allowed() {
+        let config =
+            Config::parse("listen = 127.0.0.1:5353\nupstream = tls 1.1.1.1 cloudflare-dns.com\n")
+                .unwrap();
+        let allowlist = Allowlist::new();
+        let cache = Arc::new(Cache::new(100, Duration::from_secs(60 * 60)));
+        let gatekeeper = Gatekeeper::new(
+            allowlist.clone(),
+            Blocklist::new(),
+            Arc::clone(&cache),
+            Arc::new(Conductor::new(config.upstreams()).unwrap()),
+            None,
+            Duration::from_secs(2),
+            RebindGuard::new(),
+        );
+        allowlist.load_from_str("allowed.example.com\n");
+
+        let (q, answer) = upstream_answer("forged.example.com", &[ip("203.0.113.9")]);
+        let (response, disposition) =
+            gatekeeper.deliver(&q, answer, CacheWrite::Allowed, Signature::Bogus);
+        assert!(matches!(response, Response::Failure));
+        assert_eq!(disposition, Disposition::DnssecBogus);
+
+        let (q, answer) = upstream_answer("allowed.example.com", &[ip("203.0.113.9")]);
+        let (response, disposition) =
+            gatekeeper.deliver(&q, answer, CacheWrite::Allowed, Signature::Bogus);
+        assert!(matches!(response, Response::Answer(_)));
+        assert_eq!(disposition, Disposition::Allowed);
+        assert_eq!(cache.len(), 0);
+
+        let (q, answer) = upstream_answer("clean.example.com", &[ip("203.0.113.9")]);
+        let (response, _) =
+            gatekeeper.deliver(&q, answer, CacheWrite::Allowed, Signature::NotFlagged);
+        assert!(matches!(response, Response::Answer(_)));
+        assert_eq!(cache.len(), 1);
+    }
+
     #[test]
     fn an_answer_pointing_inward_is_discarded_and_not_cached() {
         // The technique for turning a browser into a pivot into the LAN.
@@ -1175,23 +1220,23 @@ mod tests {
         }
     }
 
-    /// Should change: an answer with a flagged signature is journalled as dnssec-bogus.
-    /// Should not change: a fail-open allow is still journalled as fail-open.
+    /// Should change: while the blocklist is unavailable, an answer whose signature failed is
+    /// still refused, and journalled as dnssec-bogus rather than as let through.
+    /// Should not change: a clean answer in that window is still journalled as fail-open.
     #[test]
-    fn a_bogus_signature_is_served_as_usual_but_categorized_differently() {
-        assert_eq!(
-            disposition_with(CacheWrite::Allowed, Signature::Bogus),
-            Disposition::DnssecBogus
-        );
-        assert_eq!(
-            disposition_with(CacheWrite::Allowed, Signature::NotFlagged),
-            Disposition::Allowed
-        );
-        assert_eq!(
-            disposition_with(CacheWrite::Forbidden, Signature::Bogus),
-            Disposition::FailOpen,
-            "a window with no protection must not be overwritten"
-        );
+    fn a_failed_signature_is_refused_even_while_the_list_is_unavailable() {
+        let (gatekeeper, cache) = parts(Blocklist::new());
+        let (q, answer) = upstream_answer("forged.example.com", &[ip("203.0.113.9")]);
+        let (response, disposition) =
+            gatekeeper.deliver(&q, answer, CacheWrite::Forbidden, Signature::Bogus);
+        assert!(matches!(response, Response::Failure));
+        assert_eq!(disposition, Disposition::DnssecBogus);
+
+        let (q, answer) = upstream_answer("clean.example.com", &[ip("203.0.113.9")]);
+        let (_, disposition) =
+            gatekeeper.deliver(&q, answer, CacheWrite::Forbidden, Signature::NotFlagged);
+        assert_eq!(disposition, Disposition::FailOpen);
+        assert_eq!(cache.len(), 0);
     }
 
     /// Should change: with the upstream slots full and nothing cached, the query fails and is

@@ -15,8 +15,9 @@
    genuine connection failure is `Err`, and `Conductor` counts failures on `Err` alone.
    Merge them and every typo on the network produces "the server is broken" while a healthy
    upstream gets demoted. On SERVFAIL, `Exchange` retries with the CD flag: getting an
-   answer means the signature failed to validate (`Signature::Bogus`, report-only); getting
-   nothing returns `Answer::ServerFailure`. Neither counts as an upstream failure.
+   answer means the signature failed to validate (`Signature::Bogus`, which the gatekeeper
+   refuses with SERVFAIL unless the user allowed the domain); getting nothing returns
+   `Answer::ServerFailure`. Neither counts as an upstream failure.
 5. **Over the rate limit, or from outside the networks it serves, do not respond at all —
    and still do not return REFUSED.** The loopback address is exempt from both; the self
    health check goes through it. Any answer to an outside source, an error included, makes

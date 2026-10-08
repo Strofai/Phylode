@@ -52,10 +52,10 @@ pub enum Disposition {
     /// An upstream answered, but answered SERVFAIL (including on the CD retry). The
     /// upstream is fine; usually the domain's own name servers are broken.
     ServFail,
-    /// Upstream signature validation failed; the CD retry returned an answer and it was
-    /// served as usual (report-only mode).
-    /// **This category must be countable** — a week or two of these decides whether to
-    /// start enforcing.
+    /// Upstream signature validation failed (the CD retry returned an answer), so the device
+    /// got SERVFAIL. A domain the user allowed is journalled as allowed instead.
+    /// **This must stay distinct from a blocklist hit** — the weekly summary lists these
+    /// domains so a wrongly signed site the household needs can be allowed.
     DnssecBogus,
     /// The upstream answer pointed at an address inside the local network, so the whole
     /// response was dropped (DNS rebinding defence).

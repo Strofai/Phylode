@@ -63,8 +63,8 @@ pub enum Signature {
     /// Signature validation failed upstream (it returned SERVFAIL), and the answer only came
     /// back on the retry with the CD flag set.
     ///
-    /// ⚠️ This is report-only by decision: such answers are served to the device as usual and
-    /// merely recorded. Switching to enforcement needs an explicit decision.
+    /// The gatekeeper refuses such an answer unless the user allowed the domain; the retry is
+    /// what lets the journal say why the domain failed.
     Bogus,
 }
 

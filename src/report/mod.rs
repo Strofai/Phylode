@@ -77,8 +77,8 @@ pub struct Summary {
     /// Times an answer pointed into the local network and the whole response was dropped
     /// (DNS rebinding defence).
     pub rebind_blocked: u64,
-    /// Times an upstream signature failed to validate and the answer was allowed through
-    /// per configuration, plus the domains involved (report-only mode).
+    /// Times an upstream signature failed to validate and the answer was refused, plus the
+    /// domains involved.
     pub dnssec_bogus: u64,
     pub dnssec_bogus_by_domain: HashMap<String, u64>,
     /// Times an upstream answered but answered with a failure. The upstream is fine —
@@ -308,13 +308,12 @@ impl Summary {
             );
         }
 
-        // DNSSEC is in report-only mode, so this reports "how many and which domains"
-        // rather than "blocked". Whether to start enforcing is a decision to make once
-        // this number is known.
+        // Not counted as "blocked": no list matched. The domains are named so that a site the
+        // household needs, signed wrongly by its owner, can be allowed.
         if self.dnssec_bogus > 0 {
             out.push_str(&format!(
-                "   · {} answers failed signature validation (allowed through per your \
-                 configuration, recorded only)\n",
+                "   · {} answers failed signature validation and were refused; \
+                 `phylode allow <domain>` lets a domain you trust through\n",
                 self.dnssec_bogus
             ));
             for (domain, count) in sorted_desc(&self.dnssec_bogus_by_domain)
@@ -712,6 +711,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("dnssec-failed.org: 2"), "{text}");
+        assert!(text.contains("`phylode allow <domain>`"), "{text}");
         assert!(
             text.contains("1 queries got a failure from upstream"),
             "{text}"
