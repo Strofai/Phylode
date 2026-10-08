@@ -65,17 +65,19 @@ impl Name {
         Self::from_wire(&wire)
     }
 
-    /// Builds from a wire-format name. Returns `None` for anything that does not convert back
-    /// to a valid domain — for instance a non-ASCII name sent as raw UTF-8 bytes (Apple devices
-    /// convert to `xn--` punycode first, so this is not normally reached).
+    /// Builds from a wire-format name. Returns `None` unless the name is already in the form
+    /// the upstream layer sends (letter case aside) — for instance a non-ASCII name sent as raw
+    /// bytes (Apple devices convert to `xn--` punycode first, so this is not normally reached).
     ///
-    /// What breaks if you change it: let such a name through and it travels to the upstream
-    /// layer escaped as a `\344…` string, fails to convert to a domain before sending, and is
-    /// counted as that upstream failing — two malformed packets would demote a healthy server.
+    /// What breaks if you change it: the upstream layer converts the name with IDNA before
+    /// sending, which deletes or folds some bytes (`doublecl\255ick.net` becomes
+    /// `doubleclick.net`). Accept a name that conversion changes and the lists judge one domain
+    /// while the upstream resolves another — any listed domain becomes reachable. A name that
+    /// does not convert at all would instead be counted as that upstream failing.
     fn from_wire(name: &hickory_proto::rr::Name) -> Option<Self> {
         let text = name.to_ascii();
-        hickory_proto::rr::Name::from_utf8(&text).ok()?;
-        Some(Self::parse(&text))
+        let sent = hickory_proto::rr::Name::from_utf8(&text).ok()?.to_ascii();
+        sent.eq_ignore_ascii_case(&text).then(|| Self::parse(&text))
     }
 }
 
@@ -437,6 +439,25 @@ mod tests {
         assert_eq!(
             Name::from_wire(&encoded).map(|name| name.as_str().to_string()),
             Some("xn--fiq228c.com".to_string())
+        );
+    }
+
+    /// Should change: a label carrying a byte that IDNA deletes or folds (soft hyphen 0xAD,
+    /// feminine ordinal 0xAA) is rejected, because the name sent upstream would be a different,
+    /// possibly listed, domain from the one the policy layer judged.
+    /// Should not change: the same domain in plain ASCII, any case, is accepted.
+    #[test]
+    fn a_name_that_would_reach_the_upstream_as_another_domain_is_rejected() {
+        for label in [&b"doublecl\xADick"[..], &b"doublecl\xAAick"[..]] {
+            let disguised =
+                hickory_proto::rr::Name::from_labels(vec![label, b"net".as_slice()]).unwrap();
+            assert_eq!(Name::from_wire(&disguised), None, "{disguised:?}");
+        }
+
+        let plain: hickory_proto::rr::Name = "DoubleClick.net.".parse().unwrap();
+        assert_eq!(
+            Name::from_wire(&plain).map(|name| name.as_str().to_string()),
+            Some("doubleclick.net".to_string())
         );
     }
 
