@@ -96,6 +96,15 @@ jobs:
           sudo grep -rqs journal-check.example.com /var/log/phylode/queries \
             || { echo "::error::the service could not write its journal"; exit 1; }
 
+      - name: The service refuses to run as root
+        run: |
+          if out=$(sudo /usr/local/bin/phylode --config /usr/local/etc/phylode.conf 2>&1); then
+            echo "$out"; echo "::error::the service ran as root"; exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q "does not run as root" \
+            || { echo "::error::it stopped, but not because it was root"; exit 1; }
+
       - name: Updating over an older install removes a link planted among the logs
         run: |
           # The layout before this fix: the service account owned the folder and could put a

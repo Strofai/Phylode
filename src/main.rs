@@ -529,6 +529,18 @@ fn load_config(path: &Path) -> Option<Config> {
 }
 
 fn serve(config_path: &Path) -> ExitCode {
+    // The service writes into folders the service account owns. As root it would follow a
+    // link that account planted there and write wherever it points (Apple's Secure Coding
+    // Guide, "Elevating Privileges Safely": run with the least privilege the work needs).
+    // launchd always starts it as _phylode.
+    if install::running_as_root() {
+        log_line!(
+            "Phylode does not run as root. `sudo phylode on` starts it as the _phylode account; \
+             to try it out, run it from your own account with a configuration that listens on a \
+             port above 1023."
+        );
+        return ExitCode::from(2);
+    }
     let Some(config) = load_config(config_path) else {
         return ExitCode::from(2);
     };

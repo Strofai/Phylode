@@ -446,6 +446,11 @@ fn require_root() -> Result<(), InstallError> {
     }
 }
 
+/// Whether this process runs with root's effective user ID. False when that cannot be told.
+pub fn running_as_root() -> bool {
+    run("/usr/bin/id", &["-u"]).is_ok_and(|uid| uid.trim() == "0")
+}
+
 /// Fails unless `dir` (or, if it does not exist yet, the nearest folder above it) and every
 /// folder above that can only be changed by root or an administrator. Administrators can
 /// become root anyway, so only a standard account being able to write there is a risk.
