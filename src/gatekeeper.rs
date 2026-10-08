@@ -97,14 +97,9 @@ impl Gatekeeper {
     async fn forward(&self, query: &Query, write: CacheWrite) -> (Response, Disposition) {
         // A fresh cache entry is returned directly. A stale one is held back — it is only
         // used if every upstream really is down.
-        //
-        // Everything in the cache has already passed the rebinding check (failures never
-        // get cached), so it is not re-checked here.
-        // What breaks if you change it: after removing an internal-domain exception, answers
-        // already in the cache are still served, for as long as their TTL lasts.
         let stale = match self.cache.get(query) {
-            Hit::Fresh(cached) => return (response_of(cached), disposition_for(write)),
-            Hit::Stale(cached) => Some(response_of(cached)),
+            Hit::Fresh(cached) => return self.serve_cached(query, cached, write),
+            Hit::Stale(cached) => Some(cached),
             Hit::Miss => None,
         };
 
@@ -116,16 +111,55 @@ impl Gatekeeper {
             // Privacy). Carry on with a stale answer if there is one, and only fail if there
             // is not — this is what product principle 1 looks like in code.
             Outcome::AllDown => match stale {
-                Some(response) => (response, disposition_for(write)),
+                Some(cached) => self.serve_cached(query, cached, write),
                 None => (Response::Failure, Disposition::Failed),
             },
             // The in-flight limit is full: same fallback as every upstream being down, but
             // the journal has to say that the gatekeeper itself was saturated.
             Outcome::Busy => match stale {
-                Some(response) => (response, disposition_for(write)),
+                Some(cached) => self.serve_cached(query, cached, write),
                 None => (Response::Failure, Disposition::Overloaded),
             },
         }
+    }
+
+    /// A cached answer, judged by the rebinding defence against the network as it is now.
+    ///
+    /// What breaks if you change it: the check made when the answer was cached is not enough.
+    /// The home's IPv6 prefix changes without notice, and an internal-domain exception can be
+    /// removed; an answer that pointed outside then may point inside, and would be served for
+    /// the rest of its TTL.
+    fn serve_cached(
+        &self,
+        query: &Query,
+        cached: Cached,
+        write: CacheWrite,
+    ) -> (Response, Disposition) {
+        if let Cached::Records(records) = &cached
+            && self.points_inward(query, records)
+        {
+            return self.discarded_inward();
+        }
+        (response_of(cached), disposition_for(write))
+    }
+
+    /// Whether the rebinding defence rejects these records for this name.
+    fn points_inward(&self, query: &Query, records: &crate::dns::Records) -> bool {
+        self.rebind_guard
+            .inspect(query.name().as_str(), &records.addresses())
+            == Rebinding::Blocked
+    }
+
+    /// What a device gets in place of an answer pointing into the local network: NOERROR with
+    /// an SOA rather than "no such domain", because the name does exist and we are only not
+    /// handing over that answer. The SOA is required; without it devices retry endlessly.
+    fn discarded_inward(&self) -> (Response, Disposition) {
+        (
+            Response::NoRecords {
+                ttl: self.block_ttl,
+            },
+            Disposition::Rebind,
+        )
     }
 
     /// Translates an upstream answer into what goes back to the device, deciding on the way
@@ -161,20 +195,8 @@ impl Gatekeeper {
                 // discarded whole. **Never cached**, for the same reason as a fail-open
                 // allow — cached, the domain would keep getting the discarded result for the
                 // cache lifetime even after the exception is configured.
-                if self
-                    .rebind_guard
-                    .inspect(query.name().as_str(), &records.addresses())
-                    == Rebinding::Blocked
-                {
-                    // Return NOERROR with an SOA rather than "no such domain": the name does
-                    // exist, we are just not handing over that answer. The SOA is required,
-                    // and without it devices retry endlessly.
-                    return (
-                        Response::NoRecords {
-                            ttl: self.block_ttl,
-                        },
-                        Disposition::Rebind,
-                    );
+                if self.points_inward(query, &records) {
+                    return self.discarded_inward();
                 }
                 if cacheable {
                     self.cache
@@ -861,6 +883,43 @@ mod tests {
         assert!(matches!(
             gatekeeper.respond(&cloaked, device).await,
             Response::Blocked { .. }
+        ));
+    }
+
+    /// Should change: a cached answer that points into the home network as it is now — here
+    /// after the provider renumbered the home onto that prefix — is discarded like a fresh one.
+    /// Should not change: a cached answer pointing outside is still served from the cache.
+    #[tokio::test]
+    async fn a_cached_answer_is_judged_against_the_network_as_it_is_now() {
+        let blocklist = Blocklist::new();
+        blocklist.load_from_str("ads.example.com\n");
+        let guard = RebindGuard::new();
+        let (gatekeeper, cache) = parts_full(blocklist, None, guard.clone());
+        let device: IpAddr = "192.168.0.20".parse().unwrap();
+        for (name, address) in [
+            ("evil.example.com", "2001:db8:b::42"),
+            ("fine.example.com", "2001:db8:c::42"),
+        ] {
+            let q = Query::new(Name::parse(name), RecordType::Aaaa);
+            let records = crate::dns::Records::from_addresses(
+                q.name(),
+                Duration::from_secs(300),
+                &[ip(address)],
+            );
+            cache.insert(q, Cached::Records(records));
+        }
+
+        guard.attach("2001:db8:b::/64".parse().unwrap());
+
+        let evil = Query::new(Name::parse("evil.example.com"), RecordType::Aaaa);
+        assert!(matches!(
+            gatekeeper.respond(&evil, device).await,
+            Response::NoRecords { .. }
+        ));
+        let fine = Query::new(Name::parse("fine.example.com"), RecordType::Aaaa);
+        assert!(matches!(
+            gatekeeper.respond(&fine, device).await,
+            Response::Answer(_)
         ));
     }
 

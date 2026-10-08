@@ -87,6 +87,14 @@ impl RebindGuard {
         }
     }
 
+    /// Test only: sets the attached network instead of reading this Mac's address.
+    #[cfg(test)]
+    pub fn attach(&self, network: IpNetwork) {
+        if let Ok(mut attached) = self.attached.write() {
+            *attached = Some(network);
+        }
+    }
+
     /// Whether this domain returning these addresses may be handed to the device.
     ///
     /// `addresses` holds every address a device might connect to ([`crate::dns::Records::addresses`]).
