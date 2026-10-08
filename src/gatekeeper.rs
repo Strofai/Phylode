@@ -15,7 +15,8 @@ use crate::dns::{Answer, Query, RecordType, Responder, Response, Signature};
 use crate::health;
 use crate::journal::{Disposition, EventKind, Journal, Record, USER_ALLOWED};
 use crate::policy::{
-    self, Admit, Allowlist, Blocklist, RateLimit, RebindGuard, Rebinding, ServedNetworks, Verdict,
+    self, Admit, Allowlist, Blocklist, RateLimit, RebindGuard, Rebinding, ServedNetworks,
+    SharedAddressSpace, Verdict,
 };
 use crate::upstream::{Conductor, Outcome};
 
@@ -88,7 +89,7 @@ impl Gatekeeper {
             rebind_guard,
             rate_limit: RateLimit::new(),
             apple_rate_limit: RateLimit::new(),
-            served: ServedNetworks::new(&[]),
+            served: ServedNetworks::new(&[], SharedAddressSpace::default()),
             own_addresses: Vec::new(),
         }
     }

@@ -76,9 +76,11 @@ Mac 也改用 Phylode，最後顯示你的 Mac 在網路上的位址，下一步
 [網路設定說明](docs/network-setup.zh-TW.md)會逐步帶你完成每個步驟、確認是否生效，以及無法變更
 路由器設定時如何逐台設定裝置。
 
-Phylode 只回應家用與辦公室網路常用的私有位址範圍（10.x、172.16–31.x、192.168.x、100.64–127.x、
-169.254.x，以及 IPv6 的 `fc00::/7` 和 `fe80::/10`），不回應其他任何來源。如果你的網路使用公用
-位址，在 `/usr/local/etc/phylode.conf` 加一行 `serve_network`，再執行一次 `sudo phylode install`。
+Phylode 只回應家用與辦公室網路常用的私有位址範圍（10.x、172.16–31.x、192.168.x、169.254.x，
+以及 IPv6 的 `fc00::/7` 和 `fe80::/10`），不回應其他任何來源。100.64–127.x 只在這台 Mac 自己也
+拿到這段位址時才回應（有些路由器會發這段位址）；Tailscale 這類 VPN 也用這段，VPN 上的其他裝置
+預設不回應。如果你的網路使用公用位址，或想讓 VPN 上的裝置也使用 Phylode，在
+`/usr/local/etc/phylode.conf` 加一行 `serve_network`，再執行一次 `sudo phylode install`。
 
 ## 允許或封鎖網站
 

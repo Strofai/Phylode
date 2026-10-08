@@ -13,7 +13,7 @@ pub mod rebinding;
 
 pub use allowlist::{Allowlist, AllowlistError};
 pub use blocklist::{Blocklist, BlocklistError, Verdict};
-pub use clients::ServedNetworks;
+pub use clients::{ServedNetworks, SharedAddressSpace};
 pub use ratelimit::{Admit, RateLimit};
 pub use rebinding::{RebindGuard, Rebinding};
 

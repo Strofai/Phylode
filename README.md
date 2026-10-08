@@ -88,10 +88,12 @@ that it's working, and how to set up devices one by one if you can't change your
 router's settings.
 
 Phylode answers devices on the private address ranges that home and office networks use
-(10.x, 172.16–31.x, 192.168.x, 100.64–127.x, 169.254.x, and IPv6 `fc00::/7` and
-`fe80::/10`), and no one else. If your network uses public addresses, add a
-`serve_network` line to `/usr/local/etc/phylode.conf`, then run `sudo phylode install`
-again.
+(10.x, 172.16–31.x, 192.168.x, 169.254.x, and IPv6 `fc00::/7` and `fe80::/10`), and no
+one else. 100.64–127.x is answered too while the Mac itself has an address there, as on
+routers that hand it out; a VPN such as Tailscale also uses that range, and its peers are
+not answered unless you add it. If your network uses public addresses, or you want VPN
+peers to use Phylode, add a `serve_network` line to `/usr/local/etc/phylode.conf`, then
+run `sudo phylode install` again.
 
 ## Allow or block a website
 

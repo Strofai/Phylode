@@ -23,7 +23,7 @@ use phylode::health;
 use phylode::install;
 use phylode::journal::{self, EventKind, Journal, LocalZone};
 use phylode::log_line;
-use phylode::policy::{Allowlist, Blocklist, RebindGuard, ServedNetworks};
+use phylode::policy::{Allowlist, Blocklist, RebindGuard, ServedNetworks, SharedAddressSpace};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
 
@@ -675,7 +675,8 @@ async fn run(config: Config) -> Result<(), String> {
     let own_addresses = listener.local_ips();
     let rebind_guard = RebindGuard::with_internal_domains(config.internal_domains())
         .counting_as_inside(config.served_networks());
-    spawn_attached_refresh(rebind_guard.clone());
+    let shared_space = SharedAddressSpace::default();
+    spawn_attached_refresh(rebind_guard.clone(), shared_space.clone());
     let gatekeeper = Arc::new(
         Gatekeeper::new(
             allowlist,
@@ -687,25 +688,27 @@ async fn run(config: Config) -> Result<(), String> {
             rebind_guard,
         )
         .serving_on(own_addresses)
-        .answering(ServedNetworks::new(config.served_networks())),
+        .answering(ServedNetworks::new(config.served_networks(), shared_space)),
     );
     dns::serve(listener, gatekeeper)
         .await
         .map_err(|error| format!("Service stopped: {error}"))
 }
 
-/// How often the rebinding guard re-reads which IPv6 network this Mac is on. A new prefix
-/// from the provider is picked up within this long.
+/// How often the networks this Mac is on are re-read. A new prefix from the provider, or a
+/// move to a router that hands out the shared address space, is picked up within this long.
 const ATTACHED_REFRESH: Duration = Duration::from_secs(60);
 
-/// Background task: keeps the rebinding guard's idea of the home IPv6 network current,
-/// starting immediately so the first answers are already judged against it.
-fn spawn_attached_refresh(guard: RebindGuard) {
+/// Background task: keeps the rebinding guard's idea of the home IPv6 network, and whether
+/// this Mac is on the shared address space, current. Starts immediately so the first queries
+/// are already judged against them.
+fn spawn_attached_refresh(guard: RebindGuard, shared_space: SharedAddressSpace) {
     tokio::spawn(async move {
         let mut ticks = tokio::time::interval(ATTACHED_REFRESH);
         loop {
             ticks.tick().await;
             guard.refresh_attached();
+            shared_space.refresh();
         }
     });
 }
