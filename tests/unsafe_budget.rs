@@ -74,6 +74,13 @@ fn the_counter_catches_every_form_without_false_positives() {
         ("pub unsafe extern \"C\" fn g() {}", 1),
         ("#![allow(unsafe_code)]\nunsafe {}\nunsafe {}", 2),
         ("a(unsafe{b()})", 1),
+        // Quote characters that are not strings must not hide the code after them.
+        ("let q = '\"'; unsafe { f() }; let r = '\"';", 1),
+        ("let q = b'\"'; unsafe { f() }; let r = b'\"';", 1),
+        ("let q = '\\''; unsafe { f() }; let s = \"'\";", 1),
+        ("fn f<'a>(x: &'a str) { unsafe { g() } }", 1),
+        ("let s = r#\"a \" b\"#; unsafe { f() }; let t = r#\"\"#;", 1),
+        ("let s = br\"\\\"; unsafe { f() }; let t = \"\";", 1),
     ];
     for (code, expected) in should_count {
         assert_eq!(count_unsafe(code), expected, "should have counted: {code}");
@@ -87,6 +94,9 @@ fn the_counter_catches_every_form_without_false_positives() {
         "#![deny(unsafe_code)]",
         "let not_unsafe = 1;",
         "/* unsafe { } inside a block comment */",
+        "let s = r#\"unsafe { } with a \" inside\"#;",
+        "let s = br\"unsafe\";",
+        "let c = '\"'; let s = \"unsafe\";",
     ];
     for code in should_not_count {
         assert_eq!(count_unsafe(code), 0, "should not have counted: {code}");
@@ -135,48 +145,91 @@ fn count_unsafe(source: &str) -> usize {
         .count()
 }
 
-/// Replaces `//` and `/* */` comments and `"..."` strings with whitespace. Raw strings and char
-/// literals are not handled: this repository has none containing the word `unsafe`, and if one
-/// appears the budget test goes red rather than silently missing it.
+/// Replaces comments, string literals (plain, byte, C and raw, with any number of `#`) and
+/// character literals with a space, following the Rust Reference's lexical rules. A lifetime
+/// such as `'a` is code and kept.
+///
+/// What breaks if you change it: a literal the scanner does not recognise shifts where it
+/// thinks strings start and end — `'"'` read as opening a string hides the code after it.
+/// Block comments are ended at the first `*/` rather than nested, which can only show more
+/// code, never less.
 fn strip_comments_and_strings(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '/' if chars.peek() == Some(&'/') => {
-                for next in chars.by_ref() {
-                    if next == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        let starts_token = i == 0 || !is_ident(chars[i - 1]);
+        if c == '/' && next == Some('/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
             }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                let mut previous = ' ';
-                for next in chars.by_ref() {
-                    if previous == '*' && next == '/' {
-                        break;
-                    }
-                    previous = next;
-                }
-                out.push(' ');
+        } else if c == '/' && next == Some('*') {
+            i += 2;
+            while i < chars.len() && !(chars[i - 1] == '*' && chars[i] == '/') {
+                i += 1;
             }
-            '"' => {
-                let mut escaped = false;
-                for next in chars.by_ref() {
-                    if escaped {
-                        escaped = false;
-                    } else if next == '\\' {
-                        escaped = true;
-                    } else if next == '"' {
-                        break;
-                    }
-                }
-                out.push(' ');
+            i += 1;
+            out.push(' ');
+        } else if let Some(end) = starts_token.then(|| raw_string_end(&chars, i)).flatten() {
+            i = end;
+            out.push(' ');
+        } else if c == '"' {
+            i += 1;
+            while i < chars.len() && chars[i] != '"' {
+                i += if chars[i] == '\\' { 2 } else { 1 };
             }
-            other => out.push(other),
+            i += 1;
+            out.push(' ');
+        } else if c == '\'' && next == Some('\\') {
+            i += 2;
+            while i < chars.len() && chars[i] != '\'' {
+                i += 1;
+            }
+            i += 1;
+            out.push(' ');
+        } else if c == '\'' && chars.get(i + 2) == Some(&'\'') {
+            i += 3;
+            out.push(' ');
+        } else {
+            out.push(c);
+            i += 1;
         }
     }
     out
+}
+
+/// If a raw string literal (`r"…"`, `br#"…"#`, `cr##"…"##`) starts at `start`, the index just
+/// past its end; otherwise `None`.
+fn raw_string_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start;
+    if matches!(chars.get(i), Some('b' | 'c')) {
+        i += 1;
+    }
+    if chars.get(i) != Some(&'r') {
+        return None;
+    }
+    i += 1;
+    let hashes = chars[i..].iter().take_while(|&&c| c == '#').count();
+    i += hashes;
+    if chars.get(i) != Some(&'"') {
+        return None;
+    }
+    i += 1;
+    while i < chars.len() {
+        if chars[i] == '"'
+            && chars[i + 1..]
+                .iter()
+                .take(hashes)
+                .filter(|&&c| c == '#')
+                .count()
+                == hashes
+        {
+            return Some(i + 1 + hashes);
+        }
+        i += 1;
+    }
+    Some(chars.len())
 }
