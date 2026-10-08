@@ -77,6 +77,40 @@ jobs:
           dig @"$lan" iadsdk.apple.com +short +time=3 +tries=2 | grep -qx '0.0.0.0' \
             || { echo "::error::not blocking on $lan"; exit 1; }
 
+      - name: Root owns the log folder, and the service account only its logs and journal
+        run: |
+          ls -la /var/log/phylode
+          [ "$(stat -f '%Su' /var/log/phylode)" = root ] \
+            || { echo "::error::the service account can change the folder newsyslog rotates in"; exit 1; }
+          for log in stderr stdout update; do
+            [ "$(stat -f '%Su:%Sg %Lp' /var/log/phylode/$log.log)" = "_phylode:admin 640" ] \
+              || { echo "::error::$log.log is not the service's"; exit 1; }
+          done
+          [ "$(stat -f '%Su:%Sg %Lp' /var/log/phylode/queries)" = "_phylode:admin 750" ] \
+            || { echo "::error::the journal folder is not the service's"; exit 1; }
+          dig @127.0.0.1 journal-check.example.com +short > /dev/null || true
+          for _ in $(seq 1 15); do
+            sudo grep -rqs journal-check.example.com /var/log/phylode/queries && break
+            sleep 1
+          done
+          sudo grep -rqs journal-check.example.com /var/log/phylode/queries \
+            || { echo "::error::the service could not write its journal"; exit 1; }
+
+      - name: Updating over an older install removes a link planted among the logs
+        run: |
+          # The layout before this fix: the service account owned the folder and could put a
+          # link to a system file where newsyslog and install expect a log.
+          sudo chown _phylode /var/log/phylode
+          sudo -u _phylode ln -sf /etc/hosts /var/log/phylode/stdout.log.planted
+          sudo -u _phylode mv -f /var/log/phylode/stdout.log.planted /var/log/phylode/stdout.log
+          sudo ./target/release/phylode install
+          [ "$(stat -f '%Su' /etc/hosts)" = root ] \
+            || { echo "::error::install changed the owner of the file a link pointed at"; exit 1; }
+          [ -f /var/log/phylode/stdout.log ] && [ ! -L /var/log/phylode/stdout.log ] \
+            || { echo "::error::the planted link is still there"; exit 1; }
+          [ "$(stat -f '%Su' /var/log/phylode)" = root ] \
+            || { echo "::error::install left the folder with the service account"; exit 1; }
+
       - name: Reinstalling over a running service (an update) keeps it answering
         run: |
           sudo ./target/release/phylode install

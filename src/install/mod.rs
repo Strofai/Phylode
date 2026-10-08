@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::unix::fs::{PermissionsExt, chown};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, chown, lchown};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -32,6 +32,16 @@ const BINARY_PATH: &str = "/usr/local/bin/phylode";
 const ETC_DIR: &str = "/usr/local/etc/phylode";
 const LISTS_DIR: &str = "/usr/local/etc/phylode/lists";
 const LOG_DIR: &str = "/var/log/phylode";
+/// The logs launchd writes for the two jobs (`StandardOutPath`, `StandardErrorPath`), which
+/// newsyslog rotates as root. Created by `install` and handed to the service account.
+const SERVICE_LOGS: [&str; 3] = [
+    SERVICE_LOG,
+    "/var/log/phylode/stdout.log",
+    "/var/log/phylode/update.log",
+];
+/// The default `journal_dir` in `deploy/phylode.conf`; the only folder under [`LOG_DIR`] the
+/// service account can write in.
+const JOURNAL_DIR: &str = "/var/log/phylode/queries";
 
 const GATEKEEPER_PLIST: &str = include_str!("../../deploy/com.Phylode.gatekeeper.plist");
 const UPDATE_PLIST: &str = include_str!("../../deploy/com.Phylode.blocklist-update.plist");
@@ -150,9 +160,7 @@ pub fn install() -> Result<(), InstallError> {
     allow_through_firewall()?;
 
     step(&format!("Preparing the journal directory {LOG_DIR}"));
-    // Group admin, so `phylode report` needs no sudo; no one else can read it, because the
-    // journal is a complete browsing history.
-    make_dir(Path::new(LOG_DIR), 0o750, service_uid, admin_gid)?;
+    prepare_log_dir(service_uid, admin_gid)?;
     // macOS newsyslog keeps the service logs from growing without end.
     write_file(Path::new(NEWSYSLOG_PATH), NEWSYSLOG_CONFIG, 0o644, 0, 0)?;
 
@@ -725,6 +733,58 @@ fn staged_path(path: &Path) -> PathBuf {
     path.with_file_name(format!("{name}.phylode-new"))
 }
 
+/// Makes [`LOG_DIR`] root's, then gives the service account only its logs and the journal
+/// folder inside it. Group admin, so `phylode report` needs no sudo; no one else can read the
+/// contents, because the journal is a complete browsing history.
+///
+/// What breaks if you change it: newsyslog renames, compresses and chowns the logs as root,
+/// and launchd opens them as root. In a folder the service account can write, that account
+/// decides what those names point at — a link to a system file would hand it to the account,
+/// turning a compromised service into root (Apple's Secure Coding Guide, "Race Conditions and
+/// Secure File Operations": watch out for symbolic links in writable directories).
+fn prepare_log_dir(service_uid: u32, admin_gid: u32) -> Result<(), InstallError> {
+    // Executable for others so the service account can reach its own entries; it is not in
+    // the admin group. Nothing in here is readable to them.
+    make_dir(Path::new(LOG_DIR), 0o755, 0, admin_gid)?;
+    // From here on only root can add, rename or remove entries, so what is checked below is
+    // what gets chowned.
+    for log in SERVICE_LOGS {
+        let path = Path::new(log);
+        clear_unless(path, |meta| meta.is_file() && meta.nlink() == 1)?;
+        fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path)
+            .map_err(|source| io_error(path, source))?;
+        lchown(path, Some(service_uid), Some(admin_gid))
+            .map_err(|source| io_error(path, source))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o640))
+            .map_err(|source| io_error(path, source))?;
+    }
+    let journal = Path::new(JOURNAL_DIR);
+    clear_unless(journal, fs::Metadata::is_dir)?;
+    make_dir(journal, crate::journal::DIR_MODE, service_uid, admin_gid)
+}
+
+/// Removes whatever is at `path` unless it is missing or passes `keep`, which sees the entry
+/// itself rather than what a link points at. A link is removed, never followed.
+fn clear_unless(path: &Path, keep: impl Fn(&fs::Metadata) -> bool) -> Result<(), InstallError> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(io_error(path, error)),
+    };
+    if keep(&meta) {
+        return Ok(());
+    }
+    let removed = if meta.is_dir() {
+        fs::remove_dir_all(path)
+    } else {
+        fs::remove_file(path)
+    };
+    removed.map_err(|source| io_error(path, source))
+}
+
 fn make_dir(path: &Path, mode: u32, uid: u32, gid: u32) -> Result<(), InstallError> {
     fs::create_dir_all(path).map_err(|source| io_error(path, source))?;
     set_owner_and_mode(path, mode, uid, gid)
@@ -1058,6 +1118,58 @@ mod tests {
             assert!(plist.contains(&format!("<string>{SERVICE_USER}</string>")));
             assert!(plist.contains(&format!("<string>{LOG_DIR}/")));
         }
+    }
+
+    /// Every log launchd opens or newsyslog rotates is one `install` hands to the service
+    /// account, and the journal is where the default configuration puts it. A log missing
+    /// from the list would be created by launchd in a folder the account cannot write.
+    #[test]
+    fn install_prepares_every_log_the_jobs_write() {
+        let mut named: Vec<&str> = [GATEKEEPER_PLIST, UPDATE_PLIST, NEWSYSLOG_CONFIG]
+            .iter()
+            .flat_map(|text| text.split(['<', '>', ' ', '\n']))
+            .filter(|word| word.starts_with(LOG_DIR) && word.ends_with(".log"))
+            .collect();
+        named.sort_unstable();
+        named.dedup();
+        let mut prepared = SERVICE_LOGS.to_vec();
+        prepared.sort_unstable();
+        assert_eq!(named, prepared);
+        assert!(DEFAULT_CONFIG.contains(&format!("journal_dir = {JOURNAL_DIR}\n")));
+    }
+
+    /// Should change: a link or a second hard link in a log's place is removed, and what it
+    /// pointed at is left alone. Should not change: a plain log and a real folder are kept.
+    #[test]
+    fn a_planted_entry_is_removed_rather_than_followed() {
+        let dir = std::env::temp_dir().join(format!("phylode-logs-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("system-file");
+        fs::write(&target, "keep").unwrap();
+        let regular = |meta: &fs::Metadata| meta.is_file() && meta.nlink() == 1;
+
+        let link = dir.join("stderr.log");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        clear_unless(&link, regular).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+
+        let hard = dir.join("stdout.log");
+        fs::hard_link(&target, &hard).unwrap();
+        clear_unless(&hard, regular).unwrap();
+        assert!(fs::symlink_metadata(&hard).is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+
+        let log = dir.join("update.log");
+        fs::write(&log, "line\n").unwrap();
+        clear_unless(&log, regular).unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap(), "line\n");
+
+        let journal = dir.join("queries");
+        fs::create_dir(&journal).unwrap();
+        clear_unless(&journal, fs::Metadata::is_dir).unwrap();
+        assert!(journal.is_dir());
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
