@@ -8,7 +8,11 @@
 //! are usually empty.** They answer "was there a window with no protection?" and "were any
 //! records dropped?" — both failures are worse when they happen silently.
 
+use std::borrow::Borrow;
 use std::collections::HashMap;
+use std::fs::File;
+use std::hash::Hash;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::journal::{self, EventKind, LocalZone};
@@ -31,6 +35,12 @@ const REPEAT_THRESHOLD: u64 = 500;
 
 /// How many entries the top-N lists show.
 const TOP_N: usize = 10;
+
+/// The most different names (devices, domains, device and domain pairs) one table counts.
+/// A household week stays far below it; a flood of made-up names would otherwise grow the
+/// tables until the service, which archives each week, runs out of memory. Ours: Apple,
+/// Anthropic and Cloudflare publish no figure for this.
+const MAX_TRACKED: usize = 100_000;
 
 /// Translates an event code into the sentence the owner reads. Unrecognized codes (kinds
 /// retired since an old journal file was written) are printed verbatim — better than the
@@ -81,6 +91,9 @@ pub struct Summary {
     pub user_allowed_by_domain: HashMap<String, u64>,
     pub events: Vec<(String, String, String)>,
     pub unreadable_files: Vec<String>,
+    /// Whether a table reached [`MAX_TRACKED`] names, so later names went uncounted in it.
+    /// The totals still count every line.
+    pub truncated: bool,
 }
 
 impl Summary {
@@ -98,22 +111,17 @@ impl Summary {
         let mut per_client_domain: HashMap<(String, String), u64> = HashMap::new();
 
         for day in days {
-            match std::fs::read_to_string(journal::queries_file(directory, day)) {
-                Ok(text) => {
-                    summary.absorb_queries(
-                        &journal::printable(&text),
-                        &mut blocked_counts,
-                        &mut per_client_domain,
-                    );
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => summary.unreadable_files.push(format!("{day}.tsv")),
+            let queries = for_each_line(&journal::queries_file(directory, day), |line| {
+                summary.absorb_query(line, &mut blocked_counts, &mut per_client_domain);
+            });
+            if queries.is_err() {
+                summary.unreadable_files.push(format!("{day}.tsv"));
             }
-
-            match std::fs::read_to_string(journal::events_file(directory, day)) {
-                Ok(text) => summary.absorb_events(&journal::printable(&text)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => summary.unreadable_files.push(format!("events-{day}.tsv")),
+            let events = for_each_line(&journal::events_file(directory, day), |line| {
+                summary.absorb_event(line);
+            });
+            if events.is_err() {
+                summary.unreadable_files.push(format!("events-{day}.tsv"));
             }
         }
 
@@ -129,80 +137,67 @@ impl Summary {
         summary
     }
 
-    fn absorb_queries(
+    fn absorb_query(
         &mut self,
-        text: &str,
+        line: &str,
         blocked_counts: &mut HashMap<String, u64>,
         per_client_domain: &mut HashMap<(String, String), u64>,
     ) {
-        for line in text.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            // Malformed lines are skipped. We write the journal ourselves, but the disk
-            // may still corrupt it.
-            let [_time, client, name, _record_type, disposition, rest @ ..] = fields.as_slice()
-            else {
-                continue;
-            };
-            if *disposition == "allowed" && rest.first() == Some(&journal::USER_ALLOWED) {
-                *self
-                    .user_allowed_by_domain
-                    .entry((*name).to_string())
-                    .or_default() += 1;
-            }
+        let fields: Vec<&str> = line.split('\t').collect();
+        // Malformed lines are skipped. We write the journal ourselves, but the disk may still
+        // corrupt it.
+        let [_time, client, name, _record_type, disposition, rest @ ..] = fields.as_slice() else {
+            return;
+        };
+        let truncated = &mut self.truncated;
+        if *disposition == "allowed" && rest.first() == Some(&journal::USER_ALLOWED) {
+            tally(&mut self.user_allowed_by_domain, *name, truncated);
+        }
 
-            self.total_queries += 1;
-            *self
-                .queries_by_client
-                .entry((*client).to_string())
-                .or_default() += 1;
-            *per_client_domain
-                .entry(((*client).to_string(), (*name).to_string()))
-                .or_default() += 1;
+        self.total_queries += 1;
+        tally(&mut self.queries_by_client, *client, truncated);
+        tally(
+            per_client_domain,
+            &((*client).to_string(), (*name).to_string()),
+            truncated,
+        );
 
-            match *disposition {
-                "blocked" => {
-                    self.blocked += 1;
-                    *self
-                        .blocked_by_client
-                        .entry((*client).to_string())
-                        .or_default() += 1;
-                    *blocked_counts.entry((*name).to_string()).or_default() += 1;
-                }
-                "fail-open" => self.fail_open_queries += 1,
-                "failed" => self.failed_queries += 1,
-                "overloaded" => self.overloaded_queries += 1,
-                "servfail" => self.servfail_queries += 1,
-                "dnssec-bogus" => {
-                    self.dnssec_bogus += 1;
-                    *self
-                        .dnssec_bogus_by_domain
-                        .entry((*name).to_string())
-                        .or_default() += 1;
-                }
-                "rebind" => {
-                    self.rebind_blocked += 1;
-                    *self
-                        .rebind_by_domain
-                        .entry((*name).to_string())
-                        .or_default() += 1;
-                }
-                _ => {}
+        match *disposition {
+            "blocked" => {
+                self.blocked += 1;
+                tally(&mut self.blocked_by_client, *client, truncated);
+                tally(blocked_counts, *name, truncated);
             }
+            "fail-open" => self.fail_open_queries += 1,
+            "failed" => self.failed_queries += 1,
+            "overloaded" => self.overloaded_queries += 1,
+            "servfail" => self.servfail_queries += 1,
+            "dnssec-bogus" => {
+                self.dnssec_bogus += 1;
+                tally(&mut self.dnssec_bogus_by_domain, *name, truncated);
+            }
+            "rebind" => {
+                self.rebind_blocked += 1;
+                tally(&mut self.rebind_by_domain, *name, truncated);
+            }
+            _ => {}
         }
     }
 
-    fn absorb_events(&mut self, text: &str) {
-        for line in text.lines() {
-            let fields: Vec<&str> = line.split('\t').collect();
-            let [time, kind, detail, ..] = fields.as_slice() else {
-                continue;
-            };
-            self.events.push((
-                (*time).to_string(),
-                (*kind).to_string(),
-                (*detail).to_string(),
-            ));
+    fn absorb_event(&mut self, line: &str) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let [time, kind, detail, ..] = fields.as_slice() else {
+            return;
+        };
+        if self.events.len() >= MAX_TRACKED {
+            self.truncated = true;
+            return;
         }
+        self.events.push((
+            (*time).to_string(),
+            (*kind).to_string(),
+            (*detail).to_string(),
+        ));
     }
 
     /// Devices whose query count is markedly higher than the others.
@@ -466,7 +461,7 @@ impl Summary {
         let dropped = self.dropped_events();
         if no_records {
             out.push_str("   Warning: cannot tell — there are no journal files for this period.\n");
-        } else if dropped.is_empty() && self.unreadable_files.is_empty() {
+        } else if dropped.is_empty() && self.unreadable_files.is_empty() && !self.truncated {
             out.push_str("   No — the journal for this period is complete.\n");
         } else {
             for (time, _, detail) in dropped {
@@ -474,6 +469,12 @@ impl Summary {
             }
             for file in &self.unreadable_files {
                 out.push_str(&format!("   Warning: could not read journal file {file}\n"));
+            }
+            if self.truncated {
+                out.push_str(&format!(
+                    "   Warning: the journal named more than {MAX_TRACKED} different devices or \
+                     domains, so the lists above leave some out; the totals count every query\n"
+                ));
             }
         }
 
@@ -487,6 +488,39 @@ pub fn recent_days(now_unix: i64, zone: &LocalZone, days: u32) -> Vec<String> {
         .rev()
         .map(|back| zone.days_before(now_unix, i64::from(back)).to_string())
         .collect()
+}
+
+/// Hands each line of the file at `path` to `absorb`, control characters replaced, reading a
+/// line at a time. A missing file has no lines; any other read failure is returned.
+///
+/// What breaks if you change it: reading the whole file first holds a day's journal (up to
+/// 200 MB) twice over in the service that archives each week.
+fn for_each_line(path: &Path, mut absorb: impl FnMut(&str)) -> std::io::Result<()> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for line in BufReader::new(file).lines() {
+        absorb(&journal::printable(&line?));
+    }
+    Ok(())
+}
+
+/// Adds one to `key`'s count. A key not yet counted is only added while the table holds fewer
+/// than [`MAX_TRACKED`]; past that, `truncated` is set.
+fn tally<K>(map: &mut HashMap<K::Owned, u64>, key: &K, truncated: &mut bool)
+where
+    K: ToOwned + Eq + Hash + ?Sized,
+    K::Owned: Eq + Hash + Borrow<K>,
+{
+    if let Some(count) = map.get_mut(key) {
+        *count += 1;
+    } else if map.len() < MAX_TRACKED {
+        map.insert(key.to_owned(), 1);
+    } else {
+        *truncated = true;
+    }
 }
 
 fn sorted_desc(map: &HashMap<String, u64>) -> Vec<(String, u64)> {
@@ -790,5 +824,38 @@ mod tests {
     fn recent_days_includes_today_and_runs_oldest_first() {
         let days = recent_days(1_789_388_676, &LocalZone::fixed_hours(8), 3);
         assert_eq!(days, ["2026-09-12", "2026-09-13", "2026-09-14"]);
+    }
+
+    /// Should change: a journal naming more devices than the tables hold stops adding new
+    /// ones, says so in item 7, and still counts every query. Should not change: the ordinary
+    /// fixture is reported complete.
+    #[test]
+    fn a_flood_of_new_names_is_capped_and_reported() {
+        let ordinary = Summary::gather(&write_fixture("ordinary"), &one_day());
+        assert!(!ordinary.truncated);
+
+        let dir = write_fixture("flood");
+        let extra = 5;
+        let flood: String = (0..MAX_TRACKED + extra)
+            .map(|n| {
+                format!(
+                    "2026-09-14 11:00:00\t10.{}.{}.{}\tapple.com\tA\tallowed\t-\n",
+                    n >> 16,
+                    (n >> 8) & 255,
+                    n & 255
+                )
+            })
+            .collect();
+        std::fs::write(dir.join("2026-09-14.tsv"), flood).unwrap();
+        std::fs::write(dir.join("events-2026-09-14.tsv"), "").unwrap();
+
+        let s = Summary::gather(&dir, &one_day());
+        assert_eq!(s.total_queries, 100_005);
+        assert_eq!(s.queries_by_client.len(), 100_000);
+        assert!(s.truncated);
+        let text = s.render();
+        assert!(text.contains("leave some out; the totals count every query"));
+        assert!(!text.contains("journal for this period is complete"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
