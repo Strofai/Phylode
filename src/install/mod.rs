@@ -56,8 +56,8 @@ const LIST_WAIT: Duration = Duration::from_secs(120);
 const ANSWER_WAIT: Duration = Duration::from_secs(15);
 /// How long `install` waits for the service to finish loading the lists after it answers.
 const LOAD_WAIT: Duration = Duration::from_secs(60);
-/// How long `uninstall` waits for launchd to unload a job. launchd gives a job 20 seconds to
-/// exit after SIGTERM (`ExitTimeOut`), so this allows for that.
+/// How long `install` and `uninstall` wait for launchd to unload a job. launchd gives a job
+/// 20 seconds to exit after SIGTERM (`ExitTimeOut`), so this allows for that.
 const BOOTOUT_WAIT: Duration = Duration::from_secs(25);
 
 /// The line the service writes to its log once the blocklist is in memory. `install` watches
@@ -117,8 +117,8 @@ pub enum InstallError {
     )]
     SomeServices { changed: String, failed: String },
     #[error(
-        "launchd still has {label} loaded, so nothing was removed; check it with `sudo launchctl \
-         print system/{label}` and run uninstall again"
+        "launchd still has {label} loaded, so it was left as it was; check it with `sudo launchctl \
+         print system/{label}` and run the same command again"
     )]
     StillLoaded { label: String },
 }
@@ -397,12 +397,7 @@ pub fn uninstall() -> Result<Vec<String>, InstallError> {
     // Files go only once both jobs are gone. What breaks if you change it: deleting the plists
     // of a job launchd still has loaded leaves a running service nothing can manage any more.
     for label in [GATEKEEPER_LABEL, UPDATE_LABEL] {
-        bootout(label);
-        if !wait_for(BOOTOUT_WAIT, || !is_loaded(label)) {
-            return Err(InstallError::StillLoaded {
-                label: label.to_string(),
-            });
-        }
+        unload(label)?;
     }
     // Not an error when it was never added (the firewall was set up by hand, say).
     let _ = run(SOCKETFILTERFW, &["--remove", BINARY_PATH]);
@@ -817,8 +812,24 @@ fn io_error(path: &Path, source: std::io::Error) -> InstallError {
 
 /// Stops a launchd job and loads it again from its plist.
 fn reload(label: &str, plist: &str) -> Result<(), InstallError> {
-    bootout(label);
+    unload(label)?;
     run(LAUNCHCTL, &["bootstrap", "system", plist]).map(|_| ())
+}
+
+/// Stops a launchd job and waits until launchd has let go of it.
+///
+/// What breaks if you change it: `bootout` returns while launchd may still be tearing the job
+/// down (a list download finishing, say). Loading it again then fails with "Bootstrap failed:
+/// 5: Input/output error", and removing its files leaves a job nothing can manage.
+fn unload(label: &str) -> Result<(), InstallError> {
+    bootout(label);
+    if wait_for(BOOTOUT_WAIT, || !is_loaded(label)) {
+        Ok(())
+    } else {
+        Err(InstallError::StillLoaded {
+            label: label.to_string(),
+        })
+    }
 }
 
 /// Stops and unloads a launchd job. A job that is not loaded is already in the wanted state,
@@ -829,12 +840,12 @@ fn bootout(label: &str) {
     }
 }
 
-/// Polls `ready` once a second until it holds or `limit` passes.
 /// Whether launchd still has this job loaded.
 fn is_loaded(label: &str) -> bool {
     run(LAUNCHCTL, &["print", &format!("system/{label}")]).is_ok()
 }
 
+/// Polls `ready` once a second until it holds or `limit` passes.
 fn wait_for(limit: Duration, mut ready: impl FnMut() -> bool) -> bool {
     let start = Instant::now();
     loop {

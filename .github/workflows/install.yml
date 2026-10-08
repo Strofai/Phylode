@@ -122,6 +122,9 @@ jobs:
 
       - name: Reinstalling over a running service (an update) keeps it answering
         run: |
+          # With a list download in progress, launchd is still tearing the job down when install
+          # unloads it; loading it again too early fails with "Bootstrap failed: 5".
+          sudo launchctl kickstart system/com.Phylode.blocklist-update
           sudo ./target/release/phylode install
           lan=$(ipconfig getifaddr en0 || ipconfig getifaddr en1)
           dig @"$lan" apple.com +short +time=3 +tries=2 | grep -E '^[0-9.]+$' \
