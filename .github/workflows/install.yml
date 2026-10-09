@@ -130,6 +130,61 @@ jobs:
           dig @"$lan" apple.com +short +time=3 +tries=2 | grep -E '^[0-9.]+$' \
             || { echo "::error::no answer on $lan after reinstalling"; exit 1; }
 
+      # macOS lets any account bind a port below 1024 on every address while nothing holds it.
+      # The impostor is Phylode itself run by this standard account, so it answers like the
+      # real service would.
+      - name: An update never leaves port 53 free for another account to take
+        run: |
+          cat > "$RUNNER_TEMP/impostor.conf" <<EOF
+          listen = 0.0.0.0:53
+          upstream = tls 1.1.1.1 cloudflare-dns.com
+          journal_dir = $RUNNER_TEMP/impostor-journal
+          EOF
+          # set +e: each failed attempt to take the port must not end the loop.
+          ( set +e
+            while true; do
+              echo "attempt" >> "$RUNNER_TEMP/impostor.log"
+              ./target/release/phylode --config "$RUNNER_TEMP/impostor.conf" >> "$RUNNER_TEMP/impostor.log" 2>&1
+              sleep 0.05
+            done ) &
+          loop=$!
+          sudo ./target/release/phylode install
+          kill "$loop" 2>/dev/null || true
+          pkill -f impostor.conf || true
+          attempts=$(grep -c '^attempt$' "$RUNNER_TEMP/impostor.log")
+          echo "the impostor tried $attempts times"
+          [ "$attempts" -ge 5 ] \
+            || { cat "$RUNNER_TEMP/impostor.log"; echo "::error::the impostor stopped trying, so this proves nothing"; exit 1; }
+          if grep -q "Phylode serving on" "$RUNNER_TEMP/impostor.log"; then
+            echo "::error::another account took port 53 during the update"; exit 1
+          fi
+
+      - name: on refuses a port 53 another account's program holds
+        run: |
+          sudo launchctl bootout system/com.Phylode.gatekeeper
+          while sudo launchctl print system/com.Phylode.gatekeeper >/dev/null 2>&1; do sleep 0.5; done
+          ./target/release/phylode --config "$RUNNER_TEMP/impostor.conf" > "$RUNNER_TEMP/impostor-on.log" 2>&1 &
+          impostor=$!
+          for _ in $(seq 1 20); do
+            dig @127.0.0.1 apple.com +short +time=1 +tries=1 | grep -q . && break
+            sleep 0.5
+          done
+          # The control: without it, a refusal below could mean the impostor never got the port.
+          grep -q "Phylode serving on" "$RUNNER_TEMP/impostor-on.log" \
+            || { cat "$RUNNER_TEMP/impostor-on.log"; echo "::error::a standard account could not take port 53 here"; exit 1; }
+          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          before=$(networksetup -getdnsservers "$service")
+          if out=$(sudo phylode on 2>&1); then
+            echo "$out"; echo "::error::on pointed DNS at a port another program holds"; exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q "is held by" \
+            || { echo "::error::on failed without naming who holds the port"; exit 1; }
+          [ "$(networksetup -getdnsservers "$service")" = "$before" ] \
+            || { echo "::error::on changed DNS even though it refused"; exit 1; }
+          kill "$impostor"
+          sudo ./target/release/phylode install
+
       - name: Resolves through the service
         run: |
           dig @127.0.0.1 apple.com +short | grep -E '^[0-9.]+$'
