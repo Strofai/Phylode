@@ -23,7 +23,7 @@ use phylode::health;
 use phylode::install;
 use phylode::journal::{self, EventKind, Journal, LocalZone};
 use phylode::log_line;
-use phylode::policy::{Allowlist, Blocklist, RebindGuard, ServedNetworks, SharedAddressSpace};
+use phylode::policy::{Allowlist, AttachedNetworks, Blocklist, RebindGuard, ServedNetworks};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
 
@@ -673,10 +673,24 @@ async fn run(config: Config) -> Result<(), String> {
 
     let cache = Arc::new(Cache::new(config.cache_capacity(), config.stale_max_age()));
     let own_addresses = listener.local_ips();
+    let attached = AttachedNetworks::default();
+    match attached.watch() {
+        Ok(true) => log_line!("Following this Mac's networks as macOS reports changes"),
+        Ok(false) => log_line!(
+            "Warning: macOS does not report network changes to Phylode; this Mac's networks \
+             are re-read every minute instead"
+        ),
+        Err(error) => log_line!("Warning: could not start following this Mac's networks: {error}"),
+    }
+    if !attached.known() {
+        log_line!(
+            "Warning: macOS has not said which networks this Mac is on; answering every private \
+             range until it does"
+        );
+    }
     let rebind_guard = RebindGuard::with_internal_domains(config.internal_domains())
-        .counting_as_inside(config.served_networks());
-    let shared_space = SharedAddressSpace::default();
-    spawn_attached_refresh(rebind_guard.clone(), shared_space.clone());
+        .counting_as_inside(config.served_networks())
+        .attached_to(attached.clone());
     let gatekeeper = Arc::new(
         Gatekeeper::new(
             allowlist,
@@ -688,29 +702,11 @@ async fn run(config: Config) -> Result<(), String> {
             rebind_guard,
         )
         .serving_on(own_addresses)
-        .answering(ServedNetworks::new(config.served_networks(), shared_space)),
+        .answering(ServedNetworks::new(config.served_networks(), attached)),
     );
     dns::serve(listener, gatekeeper)
         .await
         .map_err(|error| format!("Service stopped: {error}"))
-}
-
-/// How often the networks this Mac is on are re-read. A new prefix from the provider, or a
-/// move to a router that hands out the shared address space, is picked up within this long.
-const ATTACHED_REFRESH: Duration = Duration::from_secs(60);
-
-/// Background task: keeps the rebinding guard's idea of the home IPv6 network, and whether
-/// this Mac is on the shared address space, current. Starts immediately so the first queries
-/// are already judged against them.
-fn spawn_attached_refresh(guard: RebindGuard, shared_space: SharedAddressSpace) {
-    tokio::spawn(async move {
-        let mut ticks = tokio::time::interval(ATTACHED_REFRESH);
-        loop {
-            ticks.tick().await;
-            guard.refresh_attached();
-            shared_space.refresh();
-        }
-    });
 }
 
 /// How long to wait for the journal to flush after a stop signal. launchd waits 20 seconds

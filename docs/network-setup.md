@@ -106,6 +106,9 @@ be reached — set it back to automatic before taking the Mac elsewhere.
   server, put your own router behind it, or set devices by hand.
 - **An office or a studio:** the person who manages the network makes the change once on
   the router or DHCP server, and the Mac running Phylode should be on a wired connection.
+  Phylode answers the networks the Mac is connected to itself; devices on another network
+  the router connects, such as a separate guest network or a VLAN, need a `serve_network`
+  line for that network.
 - **A school:** the same as an office. Phylode answers only private addresses unless you add
   `serve_network` lines, so a network that uses public addresses needs those first.
 

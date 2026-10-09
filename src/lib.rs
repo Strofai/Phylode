@@ -6,10 +6,12 @@
 //! worth depending on for wire-format correctness, whereas the filtering behaviour is the
 //! product and must not be hidden inside someone else's abstraction.
 
-// No `unsafe` anywhere in this crate, with one exception in `dns::launchd` — adopting the
+// No `unsafe` anywhere in this crate, with two exceptions: `dns::launchd` adopts the
 // descriptors launchd hands over as sockets, which buys the service never having to run as
-// root. `deny` rather than `forbid`, because that exception needs an explicit allow; the
-// number of exceptions is guarded by `tests/unsafe_budget.rs`, and one more fails the build.
+// root; `policy::attached` reads Apple's SystemConfiguration framework, which buys knowing
+// which networks are really this Mac's. `deny` rather than `forbid`, because each exception
+// needs an explicit allow; their number is guarded by `tests/unsafe_budget.rs`, and one more
+// fails the build.
 // What breaks if you change it: remove this line and every memory-safety claim stops
 // holding.
 #![deny(unsafe_code)]

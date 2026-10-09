@@ -11,9 +11,9 @@
 //! exceptions or they stop working entirely.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
-use std::sync::{Arc, RwLock};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use super::AttachedNetworks;
 use crate::config::IpNetwork;
 
 /// Whether this set of answers may be handed to the device.
@@ -40,9 +40,9 @@ pub struct RebindGuard {
     internal_domains: HashSet<String>,
     /// `serve_network` blocks: the operator has said these addresses are theirs.
     configured: Vec<IpNetwork>,
-    /// The IPv6 network this Mac reaches the internet from, kept current by
-    /// [`RebindGuard::refresh_attached`]. Providers change the prefix without notice.
-    attached: Arc<RwLock<Option<IpNetwork>>>,
+    /// The networks this Mac is on. Providers change the IPv6 prefix without notice, so this
+    /// is read from macOS rather than configured.
+    attached: AttachedNetworks,
 }
 
 impl RebindGuard {
@@ -75,24 +75,11 @@ impl RebindGuard {
         self
     }
 
-    /// Re-reads which IPv6 network this Mac is attached to. Cheap and sends nothing, so it
-    /// can run every minute.
-    ///
-    /// What breaks if you change it: run only at start-up and the guard keeps the old prefix
-    /// after the provider hands out a new one — the home network then counts as outside.
-    pub fn refresh_attached(&self) {
-        let network = attached_ipv6_network();
-        if let Ok(mut attached) = self.attached.write() {
-            *attached = network;
-        }
-    }
-
-    /// Test only: sets the attached network instead of reading this Mac's address.
-    #[cfg(test)]
-    pub fn attach(&self, network: IpNetwork) {
-        if let Ok(mut attached) = self.attached.write() {
-            *attached = Some(network);
-        }
+    /// Also counts the networks this Mac is on as inside. `attached` is shared with whatever
+    /// keeps it current, so a new prefix from the provider takes effect here too.
+    pub fn attached_to(mut self, attached: AttachedNetworks) -> Self {
+        self.attached = attached;
+        self
     }
 
     /// Whether this domain returning these addresses may be handed to the device.
@@ -117,10 +104,7 @@ impl RebindGuard {
         };
         is_internal(address)
             || self.configured.iter().any(|net| net.contains(unwrapped))
-            || self
-                .attached
-                .read()
-                .is_ok_and(|attached| attached.is_some_and(|net| net.contains(unwrapped)))
+            || self.attached.contains(unwrapped)
     }
 
     /// Whether this name is on the exception list. The domain itself or any of its parents
@@ -133,28 +117,6 @@ impl RebindGuard {
 
 fn normalize(name: &str) -> String {
     name.trim().trim_end_matches('.').to_ascii_lowercase()
-}
-
-/// A public IPv6 address used only to ask the system which source address it would pick.
-/// Connecting a UDP socket sends no packet.
-const ROUTE_PROBE: Ipv6Addr = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
-
-/// The `/64` around the global IPv6 address this Mac would send from, or `None` without
-/// public IPv6.
-///
-/// `/64` because stateless address configuration only works on `/64` networks (RFC 7421),
-/// and that is how Apple devices get their IPv6 addresses. What breaks if you change it: a
-/// longer prefix leaves the rest of the home network outside; a shorter one counts other
-/// customers of the same provider as inside and blocks their sites.
-fn attached_ipv6_network() -> Option<IpNetwork> {
-    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).ok()?;
-    socket.connect((ROUTE_PROBE, 53)).ok()?;
-    match socket.local_addr().ok()?.ip() {
-        IpAddr::V6(own) if (own.segments()[0] & 0xe000) == 0x2000 => {
-            IpNetwork::new(IpAddr::V6(own), 64)
-        }
-        _ => None,
-    }
 }
 
 /// Whether this address counts as "inside the local network or this machine".
@@ -372,33 +334,23 @@ mod tests {
     /// Should not change: a clone made before the change sees it too (the gatekeeper holds one).
     #[test]
     fn the_attached_network_counts_as_inside_and_follows_changes() {
-        let guard = RebindGuard::new();
+        let attached = AttachedNetworks::fixed(&[]);
+        let guard = RebindGuard::new().attached_to(attached.clone());
         let gatekeepers_copy = guard.clone();
         assert_eq!(
             gatekeepers_copy.inspect("evil.example.com", &[ip("2001:db8:aa:bb::1")]),
             Rebinding::Clean
         );
-        *guard.attached.write().unwrap() = Some(net("2001:db8:aa:bb::/64"));
+        attached.replace_for_test(&["2001:db8:aa:bb::/64"]);
         assert_eq!(
             gatekeepers_copy.inspect("evil.example.com", &[ip("2001:db8:aa:bb::1")]),
             Rebinding::Blocked
         );
-        *guard.attached.write().unwrap() = Some(net("2001:db8:cc:dd::/64"));
+        attached.replace_for_test(&["2001:db8:cc:dd::/64"]);
         assert_eq!(
             gatekeepers_copy.inspect("evil.example.com", &[ip("2001:db8:aa:bb::1")]),
             Rebinding::Clean
         );
-    }
-
-    /// Whatever this machine's network looks like, the detected network is either absent or
-    /// a public `/64` (ULA and link-local are inside already).
-    #[test]
-    fn the_detected_network_is_a_public_slash_64_or_nothing() {
-        if let Some(network) = attached_ipv6_network() {
-            let text = network.to_string();
-            assert!(text.ends_with("/64"), "{text}");
-            assert!(text.starts_with('2') || text.starts_with('3'), "{text}");
-        }
     }
 
     #[test]

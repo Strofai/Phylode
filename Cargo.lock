@@ -837,12 +837,14 @@ name = "phylode"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "core-foundation 0.9.4",
  "futures-util",
  "hickory-proto",
  "hickory-resolver",
  "hickory-server",
  "jiff",
  "raunch",
+ "system-configuration",
  "thiserror",
  "tokio",
 ]

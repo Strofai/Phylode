@@ -47,7 +47,8 @@ property.
 ## Known boundaries
 
 - **`unsafe` appears only in `dns/launchd.rs`** (adopting the descriptors launchd hands
-  over). The crate is `deny(unsafe_code)`, and `tests/unsafe_budget.rs` counts the
+  over) **and `policy/attached.rs`** (reading which networks this Mac is on from Apple's
+  SystemConfiguration). The crate is `deny(unsafe_code)`, and `tests/unsafe_budget.rs` counts the
   exceptions — one more fails the build.
 - Packet-level bounds checking, compression-pointer loop defence and transaction ID matching
   are **done by hickory, not by us**. It has been audited by X41 D-Sec, but "someone else

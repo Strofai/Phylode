@@ -87,13 +87,14 @@ The [network setup guide](docs/network-setup.md) walks through each step, how to
 that it's working, and how to set up devices one by one if you can't change your
 router's settings.
 
-Phylode answers devices on the private address ranges that home and office networks use
-(10.x, 172.16–31.x, 192.168.x, 169.254.x, and IPv6 `fc00::/7` and `fe80::/10`), and no
-one else. 100.64–127.x is answered too while the Mac itself has an address there, as on
-routers that hand it out; a VPN such as Tailscale also uses that range, and its peers are
-not answered unless you add it. If your network uses public addresses, or you want VPN
-peers to use Phylode, add a `serve_network` line to `/usr/local/etc/phylode.conf`, then
-run `sudo phylode install` again.
+Phylode answers devices on the networks your Mac is connected to itself, over Ethernet,
+Wi-Fi or a bridge, when they use the private addresses home and office networks use (10.x,
+172.16–31.x, 192.168.x, 169.254.x, the 100.64–127.x some routers hand out, and IPv6
+`fc00::/7` and `fe80::/10`), and no one else. A VPN such as Tailscale is not one of those
+networks, so its peers are not answered; nor is another private network behind a router,
+such as a separate guest network or an office VLAN. To serve any of those, or a network on
+public addresses, add a `serve_network` line to `/usr/local/etc/phylode.conf`, then run
+`sudo phylode install` again.
 
 ## Allow or block a website
 
@@ -154,8 +155,8 @@ browsing history of everyone on your network, and your settings.
   discarded (DNS rebinding protection), names that exist only on your network are never
   sent out, and trackers hidden behind an innocent-looking alias (CNAME cloaking, or an
   HTTPS record pointing elsewhere) are blocked too. "Your network" means the private
-  ranges, any `serve_network`, and the IPv6 network your Mac is on, as Apple defines a
-  local network. If a name of your own points at a device at home, such as a
+  ranges, any `serve_network`, and every network your Mac is connected to, as Apple defines
+  a local network. If a name of your own points at a device at home, such as a
   remote-access name for a NAS, the weekly summary lists it; add an `internal_domain`
   line for it to `/usr/local/etc/phylode.conf`.
 - **It looks after itself.** Every 10 seconds, Phylode checks that it's still answering
@@ -183,8 +184,9 @@ network, a graphical interface, and telemetry of any kind.
 Rust, on macOS. The DNS protocol layer is
 [hickory-dns](https://github.com/hickory-dns/hickory-dns); filtering, caching, the journal,
 summaries, configuration and the commands are Phylode's own code. The crate forbids
-`unsafe` code except in the two functions that receive network sockets from macOS, and a
-test fails the build if another appears.
+`unsafe` code except in two places: the two functions that receive network sockets from
+macOS, and two lines that read which networks the Mac is on from Apple's
+SystemConfiguration framework. A test fails the build if another appears.
 
 To contribute, read [CONTRIBUTING.md](CONTRIBUTING.md); writing follows
 [docs/WRITING.md](docs/WRITING.md). To report a security issue, see

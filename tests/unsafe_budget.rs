@@ -1,4 +1,4 @@
-//! Enforces the rule that exactly one place in the project may use `unsafe`.
+//! Enforces the rule that only the files listed in `BUDGET` may use `unsafe`.
 //!
 //! It counts the actual `unsafe` keyword in code (blocks, functions, impls), not the attribute
 //! that opens the exception — attributes come as `#[allow]`, `#![allow]` and combined forms, so
@@ -12,10 +12,12 @@ use std::path::{Path, PathBuf};
 
 /// Files permitted to contain `unsafe`, and how many occurrences each may have.
 ///
-/// The only exception today is adopting launchd's descriptors as sockets: the price of the
-/// service never running as root, which buys not giving root to a program with a network port
-/// open to the world.
-const BUDGET: &[(&str, usize)] = &[("src/dns/launchd.rs", 2)];
+/// Adopting launchd's descriptors as sockets is the price of the service never running as
+/// root, which buys not giving root to a program with a network port open to the world.
+/// Reading Apple's SystemConfiguration framework (one value read out of its containers, one
+/// constant it exports) is the price of knowing which networks are this Mac's own rather than
+/// guessing from the route, which buys not serving VPN peers or forged private addresses.
+const BUDGET: &[(&str, usize)] = &[("src/dns/launchd.rs", 2), ("src/policy/attached.rs", 2)];
 
 /// Directories and individual files to scan, relative to the repository root. Missing ones are
 /// skipped.

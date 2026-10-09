@@ -15,8 +15,8 @@ use crate::dns::{Answer, Query, RecordType, Responder, Response, Signature};
 use crate::health;
 use crate::journal::{Disposition, EventKind, Journal, Record, USER_ALLOWED};
 use crate::policy::{
-    self, Admit, Allowlist, Blocklist, RateLimit, RebindGuard, Rebinding, ServedNetworks,
-    SharedAddressSpace, Verdict,
+    self, Admit, Allowlist, AttachedNetworks, Blocklist, RateLimit, RebindGuard, Rebinding,
+    ServedNetworks, Verdict,
 };
 use crate::upstream::{Conductor, Outcome};
 
@@ -89,7 +89,7 @@ impl Gatekeeper {
             rebind_guard,
             rate_limit: RateLimit::new(),
             apple_rate_limit: RateLimit::new(),
-            served: ServedNetworks::new(&[], SharedAddressSpace::default()),
+            served: ServedNetworks::new(&[], AttachedNetworks::default()),
             own_addresses: Vec::new(),
         }
     }
@@ -514,7 +514,12 @@ mod tests {
             journal,
             Duration::from_secs(2),
             rebind_guard,
-        );
+        )
+        // The network the test devices (192.168.0.x and 192.168.1.x) are on.
+        .answering(ServedNetworks::new(
+            &[],
+            AttachedNetworks::fixed(&["192.168.0.0/23"]),
+        ));
         (gatekeeper, cache)
     }
 
@@ -893,8 +898,9 @@ mod tests {
     async fn a_cached_answer_is_judged_against_the_network_as_it_is_now() {
         let blocklist = Blocklist::new();
         blocklist.load_from_str("ads.example.com\n");
-        let guard = RebindGuard::new();
-        let (gatekeeper, cache) = parts_full(blocklist, None, guard.clone());
+        let attached = AttachedNetworks::fixed(&[]);
+        let guard = RebindGuard::new().attached_to(attached.clone());
+        let (gatekeeper, cache) = parts_full(blocklist, None, guard);
         let device: IpAddr = "192.168.0.20".parse().unwrap();
         for (name, address) in [
             ("evil.example.com", "2001:db8:b::42"),
@@ -909,7 +915,7 @@ mod tests {
             cache.insert(q, Cached::Records(records));
         }
 
-        guard.attach("2001:db8:b::/64".parse().unwrap());
+        attached.replace_for_test(&["2001:db8:b::/64"]);
 
         let evil = Query::new(Name::parse("evil.example.com"), RecordType::Aaaa);
         assert!(matches!(

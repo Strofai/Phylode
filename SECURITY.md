@@ -50,10 +50,10 @@ There are no releases yet. Only the latest `main` is supported.
 - **Anyone on a served network can use it.** On a shared network, such as a café or a
   hotel, that includes strangers, and their queries are recorded in the query journal.
   Phylode is meant for a Mac that stays on one network; on a laptop that travels, run
-  `sudo phylode uninstall` before joining networks you don't control. 100.64.0.0/10 is
-  served only while the Mac itself has an address there, as some home routers hand out; a
-  Mac connected straight to a provider that hands it such an address would also answer that
-  provider's other customers.
+  `sudo phylode uninstall` before joining networks you don't control. Only networks
+  the Mac is connected to itself are served, never one reached through a VPN; a Mac
+  connected straight to a provider's network, as with a 100.64.0.0/10 address handed out by
+  the provider, would also answer the provider's other customers on that network.
 - **The blocklists are trusted as downloaded.** They come over HTTPS from HaGeZi's
   published mirrors and are checked for size, encoding and entry count, but not against a
   signature, since none is published. Someone who took over the source could block any

@@ -48,7 +48,9 @@ jobs:
           dir="$RUNNER_TEMP/live"
           mkdir -p "$dir"
           printf 'ads.example.test\n' > "$dir/list.txt"
-          printf 'listen = 0.0.0.0:15353\nupstream = tls 1.1.1.1 cloudflare-dns.com\nblocklist = %s/list.txt\njournal_dir = %s/journal\n' \
+          # The aliases sit on loopback, not on a wired or Wi-Fi network, so Phylode serves them
+          # only when the configuration names them, as an owner would for any other network.
+          printf 'listen = 0.0.0.0:15353\nupstream = tls 1.1.1.1 cloudflare-dns.com\nblocklist = %s/list.txt\njournal_dir = %s/journal\nserve_network = 10.99.0.0/16\n' \
             "$dir" "$dir" > "$dir/phylode.conf"
           echo "LIVE_DIR=$dir" >> "$GITHUB_ENV"
 

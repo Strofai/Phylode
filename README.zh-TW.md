@@ -76,11 +76,12 @@ Mac 也改用 Phylode，最後顯示你的 Mac 在網路上的位址，下一步
 [網路設定說明](docs/network-setup.zh-TW.md)會逐步帶你完成每個步驟、確認是否生效，以及無法變更
 路由器設定時如何逐台設定裝置。
 
-Phylode 只回應家用與辦公室網路常用的私有位址範圍（10.x、172.16–31.x、192.168.x、169.254.x，
-以及 IPv6 的 `fc00::/7` 和 `fe80::/10`），不回應其他任何來源。100.64–127.x 只在這台 Mac 自己也
-拿到這段位址時才回應（有些路由器會發這段位址）；Tailscale 這類 VPN 也用這段，VPN 上的其他裝置
-預設不回應。如果你的網路使用公用位址，或想讓 VPN 上的裝置也使用 Phylode，在
-`/usr/local/etc/phylode.conf` 加一行 `serve_network`，再執行一次 `sudo phylode install`。
+Phylode 只回應這台 Mac 自己透過有線、Wi-Fi 或橋接接著的網路，而且是家用與辦公室網路常用的私有
+位址（10.x、172.16–31.x、192.168.x、169.254.x、有些路由器會發的 100.64–127.x，以及 IPv6 的
+`fc00::/7` 和 `fe80::/10`），不回應其他任何來源。Tailscale 這類 VPN 不算這台 Mac 接著的網路，
+VPN 上的其他裝置不會被回應；路由器後面的另一個私有網段（例如分開的訪客網路、辦公室的 VLAN）也
+一樣。要服務這些網段，或使用公用位址的網路，在 `/usr/local/etc/phylode.conf` 加一行
+`serve_network`，再執行一次 `sudo phylode install`。
 
 ## 允許或封鎖網站
 
@@ -131,7 +132,7 @@ phylode block example.com
   被過濾。查詢次數過多的裝置，或不在服務範圍內的來源，完全收不到回應。
 - **區域網路保持私密。** 指回你網路內部的回應會被捨棄（防 DNS rebinding），只存在於內部網路的
   名稱絕不會送出去，藏在無害別名後面的追蹤器（CNAME 偽裝，或指向別處的 HTTPS 記錄）也會被封鎖。
-  「你的網路」指私人位址範圍、`serve_network` 寫的網段，以及你的 Mac 所在的 IPv6 網段，跟 Apple
+  「你的網路」指私人位址範圍、`serve_network` 寫的網段，以及你的 Mac 接著的每個網段，跟 Apple
   對區域網路的定義相同。如果你自己的網域名稱指向家裡的裝置（例如 NAS 的遠端連線名稱），每週摘要
   會列出它；在 `/usr/local/etc/phylode.conf` 加一行 `internal_domain` 即可。
 - **自行維持運作。** Phylode 每 10 秒確認一次自己仍在回應，沒有回應就重新啟動。停止回應的上游
@@ -152,8 +153,9 @@ Rust，直接依賴 9 個套件（`Cargo.lock` 共 181 個），測試 262 則�
 ## 使用的技術
 
 以 Rust 在 macOS 上開發。DNS 協定層使用 [hickory-dns](https://github.com/hickory-dns/hickory-dns)；
-過濾、快取、記錄、摘要、設定和指令都是 Phylode 自己的程式。除了從 macOS 接手網路 socket 的兩個
-函式之外，整個專案禁止 `unsafe` 程式碼，多出一個就會有測試讓建置失敗。
+過濾、快取、記錄、摘要、設定和指令都是 Phylode 自己的程式。除了兩個地方之外，整個專案禁止 `unsafe`
+程式碼：從 macOS 接手網路 socket 的兩個函式，以及從 Apple 的 SystemConfiguration 框架讀取這台
+Mac 所在網段的兩行。多出一個就會有測試讓建置失敗。
 
 想參與開發，請先閱讀 [CONTRIBUTING.md](CONTRIBUTING.md)；文字依照 [docs/WRITING.md](docs/WRITING.md)
 撰寫。回報資安問題請見 [SECURITY.md](SECURITY.md)。

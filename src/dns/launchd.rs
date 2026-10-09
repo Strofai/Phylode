@@ -5,7 +5,7 @@
 //! the native macOS approach, which also avoids the error-prone "bind as root then drop
 //! privileges" dance.
 //!
-//! ⚠️ **This is the only file in the project allowed to contain `unsafe`.**
+//! ⚠️ **One of two files allowed to contain `unsafe`** (the other is `policy/attached.rs`).
 //! The crate is `deny(unsafe_code)`; this file opens one exception per function with a SAFETY
 //! note, and `tests/unsafe_budget.rs` counts them — one more fails the build.
 

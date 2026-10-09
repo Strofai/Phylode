@@ -49,8 +49,8 @@ Resolve trade-offs by going down this list.
 - **The journal is written to disk in batches, never to a RAM disk.** A reboot would empty
   it, breaking the promise that detail is retained for 10 days.
 - **DNS is the only thing listening on the network, and only for the networks it serves.**
-  Port 53 answers loopback, the private ranges and any `serve_network` block; everything
-  else gets no response. There is no remote interface: the journal and the lists are read
+  Port 53 answers loopback, the private-range networks this Mac is connected to itself
+  (never through a VPN) and any `serve_network` block; everything else gets no response. There is no remote interface: the journal and the lists are read
   and changed on the Mac itself, or over SSH.
 
 ## Before touching dependencies

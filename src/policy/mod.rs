@@ -5,6 +5,7 @@
 //! or a change to resolution silently changes what gets blocked.
 
 pub mod allowlist;
+pub mod attached;
 pub mod blocklist;
 pub mod clients;
 pub mod local_zone;
@@ -12,8 +13,9 @@ pub mod ratelimit;
 pub mod rebinding;
 
 pub use allowlist::{Allowlist, AllowlistError};
+pub use attached::AttachedNetworks;
 pub use blocklist::{Blocklist, BlocklistError, Verdict};
-pub use clients::{ServedNetworks, SharedAddressSpace};
+pub use clients::ServedNetworks;
 pub use ratelimit::{Admit, RateLimit};
 pub use rebinding::{RebindGuard, Rebinding};
 
