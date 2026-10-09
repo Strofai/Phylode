@@ -21,7 +21,7 @@ use phylode::dns::{self, Listener};
 use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
 use phylode::install;
-use phylode::journal::{self, EventKind, Journal, LocalZone};
+use phylode::journal::{self, EventKind, Journal, LocalZone, OlderDetail};
 use phylode::log_line;
 use phylode::policy::{Allowlist, AttachedNetworks, Blocklist, RebindGuard, ServedNetworks};
 use phylode::report;
@@ -39,6 +39,7 @@ Usage:
   sudo phylode on                point this Mac's DNS at it
   sudo phylode off               put this Mac's DNS back as it was before on
   sudo phylode uninstall         remove the service (your lists and journal stay)
+  sudo phylode forget            delete the lookup journal and saved weekly summaries now
   phylode allow <domain>         allow a domain
   phylode block <domain>         block a domain
   phylode status                 show the current configuration and list status
@@ -86,6 +87,7 @@ enum Command {
     On,
     Off,
     Uninstall,
+    Forget,
     Help,
 }
 
@@ -112,6 +114,7 @@ impl Command {
             ["on"] => Ok(Self::On),
             ["off"] => Ok(Self::Off),
             ["uninstall"] => Ok(Self::Uninstall),
+            ["forget"] => Ok(Self::Forget),
             ["report"] => Ok(Self::Report {
                 config_path,
                 days: 7,
@@ -194,6 +197,13 @@ impl Command {
                     println!("DNS back as it was: {service}");
                 }
                 println!("Removed.\n\n{}", install::leftovers_message());
+            })),
+            Self::Forget => finish(install::forget().map(|removed| {
+                println!(
+                    "Deleted {}: every recorded lookup and saved weekly summary. Lookups from now \
+                     on are kept as the journal setting says.",
+                    plural(removed, "file", "files")
+                );
             })),
         }
     }
@@ -291,10 +301,26 @@ fn status(config_path: &Path) -> ExitCode {
         config.block_ttl()
     );
     println!(
-        "Query journal: {}, kept {} days",
+        "Query journal: {}, kept {} days, journal = {}",
         config.journal_dir().display(),
-        config.journal_retention_days()
+        config.journal_retention_days(),
+        config.journal().name()
     );
+    match journal::older_detail(config.journal_dir(), config.journal()) {
+        OlderDetail::None => {}
+        OlderDetail::NotApplied(running) => println!(
+            "  The running service still keeps {}; journal = {} applies once it restarts: \
+             sudo phylode install",
+            running.name(),
+            config.journal().name()
+        ),
+        OlderDetail::Until(day) => println!(
+            "  Lookups up to {day} keep more than {} does. They are deleted after {}, and weekly \
+             summaries saved by then after 12 weeks; to delete both now: sudo phylode forget",
+            config.journal().name(),
+            days_after(&day, config.journal_retention_days())
+        ),
+    }
     println!(
         "Blocklists: {}",
         plural(config.blocklists().len(), "file", "files")
@@ -385,6 +411,21 @@ fn weekly_report(config_path: &Path, days: u32) -> ExitCode {
         );
     }
     ExitCode::SUCCESS
+}
+
+/// The date `days` after `day` (both `YYYY-MM-DD`): the last day a journal file for `day` is
+/// kept when the retention is `days`.
+fn days_after(day: &str, days: u32) -> String {
+    day.parse::<jiff::civil::Date>()
+        .ok()
+        .and_then(|date| {
+            date.checked_add(jiff::Span::new().days(i64::from(days)))
+                .ok()
+        })
+        .map_or_else(
+            || format!("{days} days after {day}"),
+            |date| date.to_string(),
+        )
 }
 
 /// Renders a count with its noun, using the singular form when the count is 1.
@@ -601,6 +642,7 @@ async fn run(config: Config) -> Result<(), String> {
         config.journal_dir().to_path_buf(),
         config.journal_retention_days(),
         zone.clone(),
+        config.journal(),
     ) {
         Ok(journal) => Some(journal),
         Err(error) => {
@@ -624,7 +666,10 @@ async fn run(config: Config) -> Result<(), String> {
     );
 
     if let Some(journal) = journal.as_ref() {
-        journal.event(EventKind::Started, "Phylode started serving");
+        journal.event(
+            EventKind::Started,
+            journal::started_detail(config.journal()),
+        );
     }
     spawn_reloader(
         blocklist.clone(),

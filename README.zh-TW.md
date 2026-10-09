@@ -109,6 +109,7 @@ phylode block example.com
 - `sudo phylode off` 把你的 Mac 的 DNS 改回 `phylode on` 之前的設定。在你變更路由器設定之前，其他
   裝置會繼續使用 Phylode。
 - `sudo phylode uninstall` 會關閉並移除 Phylode。你的設定、名單和記錄會留在 Mac 上。
+- `sudo phylode forget` 立刻刪除查詢記錄和存下來的每週摘要，Phylode 照常運作。
 
 ## 遇到問題時
 
@@ -126,7 +127,10 @@ phylode block example.com
   查詢結果回應。
 - **記錄只留在你的 Mac。** 查詢記錄保留 10 天，每週摘要保留 12 週；每天的查詢記錄最多
   200 MB，不會把硬碟塞滿。這台 Mac 上的每個管理員帳號都讀得到，標準帳號讀不到。不會傳送到任何地方，
-  也沒有遠端存取。
+  也沒有遠端存取。預設每筆都記下裝置、網域和時間（`journal = All`）。想少記一點，在
+  `/usr/local/etc/phylode.conf` 設 `journal = Domains`（不記裝置）或 `journal = Zero`（只記每天允許
+  和封鎖了幾次），再執行 `sudo phylode install`。週報裡因此看不出來的項目會寫明 `Cannot tell`。
+  改了之後只影響之後的記錄；已經記下的會留到過期，`phylode status` 會寫到哪一天。
 - **允許立即生效。** 裝置只會記住封鎖結果 2 秒。
 - **不把裝置推向其他 DNS 伺服器。** Phylode 絕不回覆 REFUSED，因為這會讓裝置改用其他伺服器而不再
   被過濾。查詢次數過多的裝置，或不在服務範圍內的來源，完全收不到回應。
@@ -141,8 +145,8 @@ phylode block example.com
 
 ## 開發狀態
 
-Phylode 已經能正常運作、每天都在使用，但還沒有正式版本：`main` 就是目前的版本。程式約 11,000 行
-Rust，直接依賴 9 個套件（`Cargo.lock` 共 181 個），測試 262 則。四個入口——裝置送來的封包、上游
+Phylode 已經能正常運作、每天都在使用，但還沒有正式版本：`main` 就是目前的版本。程式約 12,000 行
+Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 277 則。四個入口——裝置送來的封包、上游
 回來的封包、封鎖名單的解析、設定檔的解析——由 GitHub Actions 工作流程進行模糊測試。
 
 接下來：由 Phylode 自己驗證收到的封包（目前由 DNS 函式庫負責）、macOS 沙箱設定，以及可選擇

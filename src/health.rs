@@ -224,8 +224,13 @@ mod tests {
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal =
-            Journal::start(dir.clone(), 10, crate::journal::LocalZone::fixed_hours(8)).unwrap();
+        let journal = Journal::start(
+            dir.clone(),
+            10,
+            crate::journal::LocalZone::fixed_hours(8),
+            crate::config::JournalDetail::All,
+        )
+        .unwrap();
 
         record_unresponsive(Some(&journal), "no response within 2s of sending the probe");
         tokio::time::sleep(FLUSH_WAIT).await;

@@ -603,6 +603,7 @@ mod tests {
             dir.clone(),
             10,
             crate::journal::LocalZone::fixed_hours(8),
+            crate::config::JournalDetail::All,
         )
         .unwrap();
 
@@ -653,6 +654,7 @@ mod tests {
             dir.clone(),
             10,
             crate::journal::LocalZone::fixed_hours(8),
+            crate::config::JournalDetail::All,
         )
         .unwrap();
         let ourselves: IpAddr = "192.168.0.192".parse().unwrap();
@@ -946,7 +948,13 @@ mod tests {
     async fn user_allows_and_apple_hard_rules_are_journalled_apart() {
         let dir = std::env::temp_dir().join(format!("phylode-allowed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal = Journal::start(dir.clone(), 10, crate::journal::LocalZone::utc()).unwrap();
+        let journal = Journal::start(
+            dir.clone(),
+            10,
+            crate::journal::LocalZone::utc(),
+            crate::config::JournalDetail::All,
+        )
+        .unwrap();
         let (gatekeeper, cache) = parts_with(Blocklist::new(), Some(journal));
         gatekeeper.allowlist.load_from_str("shop.example.com\n");
         let address: IpAddr = "93.184.216.34".parse().unwrap();

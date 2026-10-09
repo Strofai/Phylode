@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, SystemTime};
 
+use crate::config::JournalDetail;
+
 pub use civil::{Civil, LocalZone};
 pub(crate) use writer::{DIR_MODE, FILE_MODE};
 pub use writer::{FLUSH_INTERVAL, WriterError};
@@ -286,11 +288,13 @@ pub struct Journal {
 impl Journal {
     /// Opens the channel and starts the writer thread.
     ///
-    /// `zone` decides where journal files split by date and when expiry runs.
+    /// `zone` decides where journal files split by date and when expiry runs; `detail` what
+    /// each lookup record keeps.
     pub fn start(
         directory: PathBuf,
         retention_days: u32,
         zone: LocalZone,
+        detail: JournalDetail,
     ) -> Result<Self, WriterError> {
         let (sender, receiver) = sync_channel(CHANNEL_CAPACITY);
         let dropped = Arc::new(AtomicU64::new(0));
@@ -300,6 +304,7 @@ impl Journal {
             directory,
             retention_days,
             zone,
+            detail,
             Arc::clone(&dropped),
             Arc::clone(&queued),
         )?;
@@ -395,6 +400,91 @@ pub fn events_file(directory: &Path, day: &str) -> PathBuf {
     directory.join(format!("{EVENTS_PREFIX}{day}.tsv"))
 }
 
+/// The day a lookup file holds, from its name; `None` for any other file.
+pub fn queries_day(file_name: &str) -> Option<&str> {
+    let day = file_name.strip_suffix(".tsv")?;
+    let digits =
+        |part: &str, len: usize| part.len() == len && part.bytes().all(|b| b.is_ascii_digit());
+    match day.split('-').collect::<Vec<_>>().as_slice() {
+        [year, month, date] if digits(year, 4) && digits(month, 2) && digits(date, 2) => Some(day),
+        _ => None,
+    }
+}
+
+/// The detail of the event written each time the service starts. It names the `journal` level
+/// in use, which is how [`older_detail`] tells when lookups were kept at more detail.
+pub fn started_detail(level: JournalDetail) -> String {
+    format!("Phylode started serving; journal = {}", level.name())
+}
+
+/// Lookups kept at more detail than the configured `journal` level.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OlderDetail {
+    /// None are left.
+    None,
+    /// The running service started at this level, which keeps more; the configured one applies
+    /// from its next start.
+    NotApplied(JournalDetail),
+    /// Lookup files up to and including this day (`YYYY-MM-DD`) may keep more.
+    Until(String),
+}
+
+/// Whether `directory` still holds lookups kept at more detail than `configured`, judged from
+/// the level each start of the service recorded. A start recorded without a level was a
+/// version that always kept everything.
+///
+/// What breaks if you change it: levels only apply to lookups written after the change, so
+/// this is the only place an owner who switched to a lower level learns what is still kept.
+pub fn older_detail(directory: &Path, configured: JournalDetail) -> OlderDetail {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return OlderDetail::None;
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let mut starts: Vec<(String, JournalDetail)> = Vec::new();
+    for name in names.iter().filter(|name| name.starts_with(EVENTS_PREFIX)) {
+        let Ok(text) = std::fs::read_to_string(directory.join(name)) else {
+            continue;
+        };
+        for line in text.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [time, kind, detail, ..] = fields.as_slice() else {
+                continue;
+            };
+            if *kind != EventKind::Started.as_str() {
+                continue;
+            }
+            let level = detail
+                .rsplit_once("journal = ")
+                .and_then(|(_, level)| JournalDetail::parse(level))
+                .unwrap_or(JournalDetail::All);
+            let day = time.split(' ').next().unwrap_or(time);
+            starts.push((day.to_string(), level));
+        }
+    }
+    let Some(last_richer) = starts
+        .iter()
+        .rposition(|(_, level)| level.keeps_more_than(configured))
+    else {
+        return OlderDetail::None;
+    };
+    let Some((switched, _)) = starts.get(last_richer + 1) else {
+        return OlderDetail::NotApplied(starts[last_richer].1);
+    };
+    let still_kept = names
+        .iter()
+        .filter_map(|name| queries_day(name))
+        .any(|day| day <= switched.as_str());
+    if still_kept {
+        OlderDetail::Until(switched.clone())
+    } else {
+        OlderDetail::None
+    }
+}
+
 /// Whole seconds since the Unix epoch, the form every journal date is computed from. A clock
 /// set before 1970 reads as 0.
 pub fn unix_seconds(at: SystemTime) -> i64 {
@@ -409,18 +499,38 @@ pub fn unix_now() -> i64 {
 
 /// Formats a record as one TSV line. The field order is fixed; changing it makes existing
 /// files inconsistent with new ones.
-fn format_line(record: &Record, zone: &LocalZone) -> String {
+///
+/// `detail` decides what the line keeps: `All` everything, `Domains` everything but the device
+/// ([`HIDDEN_DEVICE`]), `Zero` only the day and the outcome, so the weekly summary can still
+/// count. Lines already on disk are never rewritten; they expire with the retention or go with
+/// `phylode forget`.
+fn format_line(record: &Record, zone: &LocalZone, detail: JournalDetail) -> String {
     let civil = Civil::from_unix(unix_seconds(record.at), zone);
-    format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\n",
-        civil.timestamp_string(),
-        record.client,
-        sanitize(&record.name),
-        sanitize(&record.record_type),
-        record.disposition.as_str(),
-        sanitize(&record.reason),
-    )
+    let outcome = record.disposition.as_str();
+    match detail {
+        JournalDetail::All | JournalDetail::Domains => format!(
+            "{}\t{}\t{}\t{}\t{outcome}\t{}\n",
+            civil.timestamp_string(),
+            if detail == JournalDetail::All {
+                record.client.to_string()
+            } else {
+                HIDDEN_DEVICE.to_string()
+            },
+            sanitize(&record.name),
+            sanitize(&record.record_type),
+            sanitize(&record.reason),
+        ),
+        JournalDetail::Zero => format!(
+            "{} 00:00:00\t{HIDDEN_DEVICE}\t{HIDDEN}\t{HIDDEN}\t{outcome}\t{HIDDEN}\n",
+            civil.date_string()
+        ),
+    }
 }
+
+/// What a line holds in place of a field the `journal` level leaves out.
+pub const HIDDEN: &str = "-";
+/// What a line holds in place of the device when the `journal` level leaves it out.
+pub const HIDDEN_DEVICE: &str = "0.0.0.0";
 
 /// Strips characters that would break "one record per line, one field per column"; empty
 /// values become `-`.
@@ -478,6 +588,7 @@ mod tests {
         let line = format_line(
             &record("ads.example.com", Disposition::Blocked),
             &LocalZone::fixed_hours(8),
+            JournalDetail::All,
         );
         assert!(line.ends_with('\n'));
         let fields: Vec<&str> = line.trim_end().split('\t').collect();
@@ -521,7 +632,13 @@ mod tests {
     fn a_blocking_flush_returns_only_once_the_record_is_on_disk() {
         let dir = std::env::temp_dir().join(format!("phylode-flush-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal = Journal::start(dir.clone(), 10, LocalZone::fixed_hours(8)).unwrap();
+        let journal = Journal::start(
+            dir.clone(),
+            10,
+            LocalZone::fixed_hours(8),
+            JournalDetail::All,
+        )
+        .unwrap();
         journal.event(EventKind::Stopped, "received stop signal");
 
         assert!(journal.flush_blocking(Duration::from_secs(1)));
@@ -545,6 +662,121 @@ mod tests {
             queued: Arc::new(AtomicUsize::new(0)),
         };
         assert!(!orphan.flush_blocking(Duration::from_millis(100)));
+    }
+
+    /// Should change: Domains writes every device as 0.0.0.0; Zero keeps only the day and the
+    /// outcome, with no device, domain, type or list.
+    /// Should not change: All keeps everything, and every level keeps the outcome, so the
+    /// summary can still count blocked and allowed lookups.
+    #[test]
+    fn each_journal_level_leaves_out_what_it_names() {
+        for (detail, allowed, blocked) in [
+            (
+                JournalDetail::All,
+                "\t192.168.0.9\tshop.example.com\tA\tallowed\t-\n",
+                "\t192.168.0.9\tads.example.com\tA\tblocked\tlist.txt\n",
+            ),
+            (
+                JournalDetail::Domains,
+                "\t0.0.0.0\tshop.example.com\tA\tallowed\t-\n",
+                "\t0.0.0.0\tads.example.com\tA\tblocked\tlist.txt\n",
+            ),
+            (
+                JournalDetail::Zero,
+                " 00:00:00\t0.0.0.0\t-\t-\tallowed\t-\n",
+                " 00:00:00\t0.0.0.0\t-\t-\tblocked\t-\n",
+            ),
+        ] {
+            let dir = std::env::temp_dir()
+                .join(format!("phylode-detail-{}-{detail:?}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            let journal = Journal::start(dir.clone(), 10, LocalZone::utc(), detail).unwrap();
+            for (name, disposition, reason) in [
+                ("shop.example.com", Disposition::Allowed, ""),
+                ("ads.example.com", Disposition::Blocked, "list.txt"),
+            ] {
+                journal.record(Record {
+                    at: SystemTime::now(),
+                    client: "192.168.0.9".parse().unwrap(),
+                    name: name.to_string(),
+                    record_type: "A".into(),
+                    disposition,
+                    reason: reason.into(),
+                });
+            }
+            assert!(journal.flush_blocking(Duration::from_secs(1)));
+            let queries: String = std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .filter(|entry| !entry.file_name().to_string_lossy().starts_with("events-"))
+                .filter(|entry| entry.path().is_file())
+                .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+                .collect();
+            assert!(queries.contains(allowed), "{detail:?}:\n{queries}");
+            assert!(queries.contains(blocked), "{detail:?}:\n{queries}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    #[test]
+    fn lookup_files_are_told_apart_by_name() {
+        assert_eq!(queries_day("2026-10-09.tsv"), Some("2026-10-09"));
+        for other in [
+            "events-2026-10-09.tsv",
+            "2026-10-09.txt",
+            "weekly",
+            "2026-1-09.tsv",
+        ] {
+            assert_eq!(queries_day(other), None, "{other}");
+        }
+    }
+
+    /// Should change: after switching to a level that keeps less, the day of the switch is
+    /// reported while lookup files from up to that day remain, and a start recorded before
+    /// levels existed counts as All.
+    /// Should not change: nothing is reported when no start kept more, when the files from
+    /// before the switch are gone, or when the running service still uses the richer level —
+    /// that is reported as not applied instead.
+    #[test]
+    fn lookups_kept_at_more_detail_are_found_from_the_starts() {
+        let dir = std::env::temp_dir().join(format!("phylode-older-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str| std::fs::write(dir.join(name), text).unwrap();
+        write(
+            "events-2026-10-01.tsv",
+            "2026-10-01 08:00:00\tstarted\tPhylode started serving\n",
+        );
+        write(
+            "events-2026-10-03.tsv",
+            "2026-10-03 09:00:00\tstarted\tPhylode started serving; journal = Domains\n",
+        );
+        write("2026-10-02.tsv", "");
+        write("2026-10-04.tsv", "");
+
+        assert_eq!(older_detail(&dir, JournalDetail::All), OlderDetail::None);
+        assert_eq!(
+            older_detail(&dir, JournalDetail::Domains),
+            OlderDetail::Until("2026-10-03".to_string())
+        );
+        assert_eq!(
+            older_detail(&dir, JournalDetail::Zero),
+            OlderDetail::NotApplied(JournalDetail::Domains)
+        );
+
+        std::fs::remove_file(dir.join("2026-10-02.tsv")).unwrap();
+        write("2026-10-03.tsv", "");
+        assert_eq!(
+            older_detail(&dir, JournalDetail::Domains),
+            OlderDetail::Until("2026-10-03".to_string()),
+            "the day of the switch may hold lookups from before it"
+        );
+        std::fs::remove_file(dir.join("2026-10-03.tsv")).unwrap();
+        assert_eq!(
+            older_detail(&dir, JournalDetail::Domains),
+            OlderDetail::None
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -577,6 +809,7 @@ mod tests {
         let line = format_line(
             &record(evil, Disposition::Blocked),
             &LocalZone::fixed_hours(8),
+            JournalDetail::All,
         );
         assert_eq!(
             line.matches('\n').count(),
@@ -611,7 +844,8 @@ mod tests {
     fn written_queries_give_their_place_back() {
         let dir = std::env::temp_dir().join(format!("phylode-queued-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let journal = Journal::start(dir.clone(), 10, LocalZone::utc()).unwrap();
+        let journal =
+            Journal::start(dir.clone(), 10, LocalZone::utc(), JournalDetail::All).unwrap();
         for _ in 0..10 {
             journal.record(record("a.example.com", Disposition::Allowed));
         }

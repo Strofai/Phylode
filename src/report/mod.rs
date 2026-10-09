@@ -94,6 +94,10 @@ pub struct Summary {
     /// Whether a table reached [`MAX_TRACKED`] names, so later names went uncounted in it.
     /// The totals still count every line.
     pub truncated: bool,
+    /// Whether the journal held lookups whose domain the `journal` setting left out.
+    pub hidden_domains: bool,
+    /// Whether the journal held lookups whose device the `journal` setting left out.
+    pub hidden_devices: bool,
 }
 
 impl Summary {
@@ -149,24 +153,38 @@ impl Summary {
         let [_time, client, name, _record_type, disposition, rest @ ..] = fields.as_slice() else {
             return;
         };
+        // What the `journal` setting left out is not counted as a device or domain of its own.
+        let device_known = *client != journal::HIDDEN_DEVICE;
+        let domain_known = *name != journal::HIDDEN;
+        self.hidden_devices |= !device_known;
+        self.hidden_domains |= !domain_known;
         let truncated = &mut self.truncated;
-        if *disposition == "allowed" && rest.first() == Some(&journal::USER_ALLOWED) {
+        if domain_known && *disposition == "allowed" && rest.first() == Some(&journal::USER_ALLOWED)
+        {
             tally(&mut self.user_allowed_by_domain, *name, truncated);
         }
 
         self.total_queries += 1;
-        tally(&mut self.queries_by_client, *client, truncated);
-        tally(
-            per_client_domain,
-            &((*client).to_string(), (*name).to_string()),
-            truncated,
-        );
+        if device_known {
+            tally(&mut self.queries_by_client, *client, truncated);
+        }
+        if device_known && domain_known {
+            tally(
+                per_client_domain,
+                &((*client).to_string(), (*name).to_string()),
+                truncated,
+            );
+        }
 
         match *disposition {
             "blocked" => {
                 self.blocked += 1;
-                tally(&mut self.blocked_by_client, *client, truncated);
-                tally(blocked_counts, *name, truncated);
+                if device_known {
+                    tally(&mut self.blocked_by_client, *client, truncated);
+                }
+                if domain_known {
+                    tally(blocked_counts, *name, truncated);
+                }
             }
             "fail-open" => self.fail_open_queries += 1,
             "failed" => self.failed_queries += 1,
@@ -290,6 +308,11 @@ impl Summary {
         for (client, count) in sorted_desc(&self.blocked_by_client) {
             out.push_str(&format!("   · {client}: {count}\n"));
         }
+        if self.hidden_devices && self.blocked > 0 {
+            out.push_str(
+                "   (the journal setting keeps devices out of the journal, so none are listed)\n",
+            );
+        }
         // This category differs from a blocklist hit: the list blocks ads and known-bad
         // domains, whereas this is "someone is using a domain name to target devices in
         // your house". It gets its own sentence.
@@ -326,8 +349,25 @@ impl Summary {
 
         out.push_str("\n2. Signs of devices phoning home\n");
         let bursty = self.bursty_clients();
-        if bursty.is_empty() && self.repeat_offenders.is_empty() {
-            out.push_str("   None.\n");
+        let unseen = match (self.hidden_devices, self.hidden_domains) {
+            (true, true) => Some("devices and domains"),
+            (true, false) => Some("devices"),
+            (false, true) => Some("domains"),
+            (false, false) => None,
+        };
+        match unseen {
+            Some(what) if bursty.is_empty() && self.repeat_offenders.is_empty() => {
+                out.push_str(&format!(
+                    "   Cannot tell: the journal setting keeps {what} out of the journal.\n"
+                ));
+            }
+            Some(what) => out.push_str(&format!(
+                "   Only partly checked: the journal setting keeps {what} out of the journal.\n"
+            )),
+            None if bursty.is_empty() && self.repeat_offenders.is_empty() => {
+                out.push_str("   None.\n");
+            }
+            None => {}
         }
         for (client, count) in bursty {
             out.push_str(&format!(
@@ -398,7 +438,13 @@ impl Summary {
 
         out.push_str("\n4. Domains you allowed this week\n");
         if self.user_allowed_by_domain.is_empty() {
-            out.push_str("   None were used (allow one with phylode allow).\n");
+            if self.hidden_domains {
+                out.push_str(
+                    "   Cannot tell: the journal setting keeps domains out of the journal.\n",
+                );
+            } else {
+                out.push_str("   None were used (allow one with phylode allow).\n");
+            }
         }
         match detail {
             Detail::Full => {
@@ -421,7 +467,13 @@ impl Summary {
 
         out.push_str(&format!("\n5. Top {TOP_N} most-blocked domains\n"));
         if self.top_blocked.is_empty() {
-            out.push_str("   None.\n");
+            if self.hidden_domains && self.blocked > 0 {
+                out.push_str(
+                    "   Cannot tell: the journal setting keeps domains out of the journal.\n",
+                );
+            } else {
+                out.push_str("   None.\n");
+            }
         }
         for (domain, count) in &self.top_blocked {
             out.push_str(&format!("   · {domain}: {count}\n"));
@@ -856,6 +908,66 @@ mod tests {
         let text = s.render();
         assert!(text.contains("leave some out; the totals count every query"));
         assert!(!text.contains("journal for this period is complete"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Should change: a journal kept at Domains lists no device (none as 0.0.0.0) and says it
+    /// cannot tell which devices phone home; blocked and allowed domains are still counted.
+    /// Should not change: an ordinary journal is checked as before.
+    #[test]
+    fn a_domains_journal_reports_devices_as_unknown() {
+        let ordinary = Summary::gather(&write_fixture("seen"), &one_day()).render();
+        assert!(!ordinary.contains("Cannot tell: the journal setting"));
+
+        let dir = write_fixture("domains");
+        let lines = "\
+2026-09-14 10:00:00\t0.0.0.0\tshop.example.com\tA\tallowed\t-
+2026-09-14 10:00:01\t0.0.0.0\tok.example.com\tA\tallowed\tallowlist
+2026-09-14 10:00:02\t0.0.0.0\tads.example.com\tA\tblocked\tblocklist
+";
+        std::fs::write(dir.join("2026-09-14.tsv"), lines).unwrap();
+        let s = Summary::gather(&dir, &one_day());
+        assert_eq!((s.total_queries, s.blocked), (3, 1));
+        assert!(s.queries_by_client.is_empty());
+        let text = s.render();
+        assert!(text.contains("   · ads.example.com: 1"), "{text}");
+        assert!(!text.contains("0.0.0.0:"), "{text}");
+        assert!(
+            text.contains("   Cannot tell: the journal setting keeps devices out of the journal."),
+            "{text}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Should change: a journal kept at Zero lists no device and no domain — not even "-" as
+    /// the most-blocked domain — and says it cannot tell instead of "none".
+    /// Should not change: the totals are still counted.
+    #[test]
+    fn a_zero_journal_reports_only_totals() {
+        let dir = write_fixture("zero");
+        let lines = "\
+2026-09-14 00:00:00\t0.0.0.0\t-\t-\tallowed\t-
+2026-09-14 00:00:00\t0.0.0.0\t-\t-\tallowed\t-
+2026-09-14 00:00:00\t0.0.0.0\t-\t-\tblocked\t-
+";
+        std::fs::write(dir.join("2026-09-14.tsv"), lines).unwrap();
+        let s = Summary::gather(&dir, &one_day());
+        assert_eq!((s.total_queries, s.blocked), (3, 1));
+        assert!(s.top_blocked.is_empty() && s.queries_by_client.is_empty());
+        let text = s.render();
+        assert!(!text.contains("   · -:"), "{text}");
+        assert!(!text.contains("0.0.0.0:"), "{text}");
+        assert!(
+            text.contains(
+                "   Cannot tell: the journal setting keeps devices and domains out of the journal."
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("   Cannot tell: the journal setting keeps domains out of the journal."),
+            "{text}"
+        );
+        assert!(!text.contains("None were used"), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

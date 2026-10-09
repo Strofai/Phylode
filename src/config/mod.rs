@@ -132,6 +132,55 @@ impl Protection {
     }
 }
 
+/// How much of each lookup the journal keeps, from `journal`. Each level keeps less than the
+/// one before.
+///
+/// What breaks if you change it: what a level leaves out is never written, so switching back
+/// cannot recover it; and the weekly summary must say "cannot tell" rather than "none" for
+/// what it no longer sees.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JournalDetail {
+    /// Device, domain and time of every lookup.
+    #[default]
+    All,
+    /// Domain and time of every lookup, without the device.
+    Domains,
+    /// Only the day and the outcome of each lookup, so the summary can count them.
+    Zero,
+}
+
+impl JournalDetail {
+    /// Reads `All`, `Domains` or `Zero`, in any letter case: a lowercase word should not stop
+    /// the service from starting.
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "all" => Some(Self::All),
+            "domains" => Some(Self::Domains),
+            "zero" => Some(Self::Zero),
+            _ => None,
+        }
+    }
+
+    /// The word as the configuration file and `status` write it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Domains => "Domains",
+            Self::Zero => "Zero",
+        }
+    }
+
+    /// Whether this level writes something `other` leaves out.
+    pub fn keeps_more_than(self, other: Self) -> bool {
+        let rank = |level| match level {
+            Self::Zero => 0,
+            Self::Domains => 1,
+            Self::All => 2,
+        };
+        rank(self) > rank(other)
+    }
+}
+
 /// One upstream resolver. The address is always an IP; the hostname is only used to validate
 /// the certificate.
 ///
@@ -249,12 +298,18 @@ pub struct Config {
     internal_domains: Vec<String>,
     served_networks: Vec<IpNetwork>,
     protection: Protection,
+    journal: JournalDetail,
 }
 
 impl Config {
     /// Which tier of lists the updater downloads; see [`Protection`].
     pub fn protection(&self) -> Protection {
         self.protection
+    }
+
+    /// How much of each lookup the journal keeps; see [`JournalDetail`].
+    pub fn journal(&self) -> JournalDetail {
+        self.journal
     }
 
     pub fn listen(&self) -> &[SocketAddr] {
@@ -336,6 +391,7 @@ impl Config {
         let mut internal_domains = Vec::new();
         let mut served_networks = Vec::new();
         let mut protection = Protection::default();
+        let mut journal = JournalDetail::default();
 
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
@@ -400,6 +456,7 @@ impl Config {
                     served_networks.push(network);
                 }
                 "protection" => protection = Protection::parse(value).ok_or_else(bad)?,
+                "journal" => journal = JournalDetail::parse(value).ok_or_else(bad)?,
                 _ => {
                     return Err(ConfigError::UnknownKey { line });
                 }
@@ -433,6 +490,7 @@ impl Config {
             internal_domains,
             served_networks,
             protection,
+            journal,
         })
     }
 }
@@ -494,6 +552,35 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// Should change: each level is read from `journal`, written capitalized or not.
+    /// Should not change: without the line the journal keeps everything, and any other word
+    /// is refused rather than guessed.
+    #[test]
+    fn journal_is_one_of_three_levels() {
+        assert_eq!(
+            Config::parse(MINIMAL).unwrap().journal(),
+            JournalDetail::All
+        );
+        for (word, level) in [
+            ("All", JournalDetail::All),
+            ("Domains", JournalDetail::Domains),
+            ("Zero", JournalDetail::Zero),
+        ] {
+            for written in [word.to_string(), word.to_ascii_lowercase()] {
+                let text = format!("{MINIMAL}\njournal = {written}");
+                assert_eq!(Config::parse(&text).unwrap().journal(), level);
+            }
+            assert_eq!(level.name(), word);
+        }
+        for word in ["full", "none", ""] {
+            let text = format!("{MINIMAL}\njournal = {word}");
+            assert!(
+                matches!(Config::parse(&text), Err(ConfigError::BadValue { .. })),
+                "{word:?}"
+            );
+        }
     }
 
     /// Should change: each of the three tiers is read from `protection`.

@@ -17,6 +17,8 @@ use thiserror::Error;
 use crate::config::Config;
 use crate::dns::self_probe;
 use crate::health::PROBE_NAME;
+use crate::journal;
+use crate::report::archive;
 
 /// Where `install` writes the configuration, and where every command reads it by default.
 pub const CONFIG_PATH: &str = "/usr/local/etc/phylode.conf";
@@ -297,6 +299,58 @@ pub fn on() -> Result<SwitchedOn, InstallError> {
         services,
         network_address: network_address(&config),
     })
+}
+
+/// Deletes every recorded lookup and every saved weekly summary, then restarts the service so
+/// it starts today's file afresh; launchd holds port 53 throughout, so lookups keep being
+/// answered. The service's events stay: they hold no lookups. Returns how many files went.
+///
+/// What breaks if you change it: restart before deleting and the new process writes into
+/// today's file just before it is deleted, losing the rest of the day's lookups.
+pub fn forget() -> Result<usize, InstallError> {
+    require_root()?;
+    let config = Config::load(Path::new(CONFIG_PATH)).map_err(|error| InstallError::Config {
+        detail: error.to_string(),
+    })?;
+    let journal_dir = config.journal_dir();
+    let lookups = files_in(journal_dir, |name| journal::queries_day(name).is_some())?;
+    let summaries = files_in(&journal_dir.join(archive::ARCHIVE_DIR), |name| {
+        name.ends_with(".txt")
+    })?;
+    for path in lookups.iter().chain(&summaries) {
+        fs::remove_file(path).map_err(|source| InstallError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    }
+    if is_loaded(GATEKEEPER_LABEL) {
+        run(
+            LAUNCHCTL,
+            &["kickstart", "-k", &format!("system/{GATEKEEPER_LABEL}")],
+        )?;
+    }
+    Ok(lookups.len() + summaries.len())
+}
+
+/// The files directly in `directory` whose names `wanted` accepts. A folder that does not
+/// exist holds none.
+fn files_in(directory: &Path, wanted: impl Fn(&str) -> bool) -> Result<Vec<PathBuf>, InstallError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(InstallError::Io {
+                path: directory.to_path_buf(),
+                source,
+            });
+        }
+    };
+    Ok(entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_str().is_some_and(&wanted))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .collect())
 }
 
 /// The address other devices on the network use to reach this Mac: the one it sends from

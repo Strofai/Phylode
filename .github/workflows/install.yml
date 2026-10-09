@@ -235,6 +235,22 @@ jobs:
           if echo "$report" | grep -q "blocklist failed to load"; then
             echo "::error::a fresh install already reports a window without protection"; exit 1
           fi
+          phylode status | grep -q "journal = All" \
+            || { echo "::error::status does not show the journal level"; exit 1; }
+
+      - name: forget deletes the lookups, keeps the events, and the service keeps answering
+        run: |
+          lookups() { ls /var/log/phylode/queries | grep -cE '^[0-9]{4}-[0-9]{2}-[0-9]{2}\.tsv$' || true; }
+          dig @127.0.0.1 apple.com +short +time=3 +tries=2 | grep -q .
+          sleep 3   # the journal is written in batches
+          # The control: there must be something to delete, or an empty folder proves nothing.
+          [ "$(lookups)" -ge 1 ] || { echo "::error::no lookup file before forget"; exit 1; }
+          sudo phylode forget
+          [ "$(lookups)" -eq 0 ] || { echo "::error::forget left lookup files"; exit 1; }
+          ls /var/log/phylode/queries | grep -q '^events-' \
+            || { echo "::error::forget deleted the service events"; exit 1; }
+          dig @127.0.0.1 apple.com +short +time=3 +tries=2 | grep -q . \
+            || { echo "::error::no answer after forget"; exit 1; }
 
       - name: diagnostics sees a healthy install and leaks no addresses or home folders
         run: |

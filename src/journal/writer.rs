@@ -17,6 +17,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use thiserror::Error;
 
+use crate::config::JournalDetail;
+
 use super::{
     Civil, EVENTS_PREFIX, Entry, Event, EventKind, LocalZone, events_file, format_event,
     format_line, queries_file, unix_seconds,
@@ -87,6 +89,7 @@ pub fn spawn(
     directory: PathBuf,
     retention_days: u32,
     zone: LocalZone,
+    detail: JournalDetail,
     dropped: Arc<AtomicU64>,
     queued: Arc<AtomicUsize>,
 ) -> Result<(), WriterError> {
@@ -105,7 +108,17 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name("phylode-journal".to_string())
-        .spawn(move || run(receiver, directory, retention_days, zone, dropped, queued))
+        .spawn(move || {
+            run(
+                receiver,
+                directory,
+                retention_days,
+                zone,
+                detail,
+                dropped,
+                queued,
+            );
+        })
         .map(|_| ())
         .map_err(|source| WriterError::SpawnThread { source })
 }
@@ -131,10 +144,12 @@ fn run(
     directory: PathBuf,
     retention_days: u32,
     zone: LocalZone,
+    detail: JournalDetail,
     dropped: Arc<AtomicU64>,
     queued: Arc<AtomicUsize>,
 ) {
     let mut state = State::new(directory, zone.clone(), dropped);
+    state.detail = detail;
     let mut cleaner = Cleaner::new(retention_days, zone);
     cleaner.maybe_clean(&state.directory, SystemTime::now());
     let mut last_cleanup_check = Instant::now();
@@ -177,6 +192,8 @@ fn run(
 struct State {
     directory: PathBuf,
     zone: LocalZone,
+    /// What each lookup line keeps; see [`JournalDetail`].
+    detail: JournalDetail,
     queries: DayFile,
     events: DayFile,
     pending: usize,
@@ -280,6 +297,7 @@ impl State {
         Self {
             directory,
             zone,
+            detail: JournalDetail::All,
             queries: DayFile::new(queries_file, Some(MAX_QUERY_BYTES_PER_DAY)),
             events: DayFile::new(events_file, None),
             pending: 0,
@@ -302,7 +320,11 @@ impl State {
     /// Writes one entry and says what became of it.
     fn write(&mut self, entry: &Entry) -> Written {
         let (at, line, is_event) = match entry {
-            Entry::Query(record) => (record.at, format_line(record, &self.zone), false),
+            Entry::Query(record) => (
+                record.at,
+                format_line(record, &self.zone, self.detail),
+                false,
+            ),
             Entry::Event(event) => (event.at, format_event(event, &self.zone), true),
             // The main loop intercepts this first, so it never reaches here; if it did, it
             // would simply write no line.

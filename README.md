@@ -125,6 +125,8 @@ You need an administrator account to change the lists.
   devices keep using Phylode until you change your router's settings.
 - `sudo phylode uninstall` turns Phylode off and removes it. Your settings, lists and
   query journal stay on your Mac.
+- `sudo phylode forget` deletes the query journal and the saved weekly summaries now,
+  while Phylode keeps running.
 
 ## If something goes wrong
 
@@ -146,7 +148,12 @@ browsing history of everyone on your network, and your settings.
 - **Your query journal stays on your Mac.** Lookups are kept for 10 days and weekly
   summaries for 12 weeks, and a day's lookups take at most 200 MB, so the journal can't
   fill your disk. Every administrator account on the Mac can read it; standard accounts
-  can't. Nothing is sent anywhere, and there's no remote access.
+  can't. Nothing is sent anywhere, and there's no remote access. By default each lookup
+  records the device, the domain and the time (`journal = All`). To keep less, set
+  `journal = Domains` (no device) or `journal = Zero` (only how many lookups were allowed and
+  blocked each day) in `/usr/local/etc/phylode.conf` and run `sudo phylode install`. The
+  weekly summary says "cannot tell" for whatever it can no longer see. A change applies from
+  then on; what is already kept stays until it expires, and `phylode status` says until when.
 - **Allowing works right away.** Devices remember a blocked answer for only 2 seconds.
 - **Devices aren't pushed to another DNS server.** Phylode never answers REFUSED, which
   would make devices switch servers and stop being filtered. A device sending too many
@@ -168,8 +175,8 @@ browsing history of everyone on your network, and your settings.
 ## Project status
 
 Phylode works and runs every day, but there's no release yet: `main` is the current
-version. It's about 11,000 lines of Rust with 9 direct dependencies (181 packages in
-`Cargo.lock`) and 262 tests. Four entry points — packets from devices, packets from
+version. It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in
+`Cargo.lock`) and 277 tests. Four entry points — packets from devices, packets from
 upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
 GitHub Actions workflow.
 
