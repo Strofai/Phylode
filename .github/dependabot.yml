@@ -7,6 +7,9 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # Titles follow CLAUDE.md: one of five prefixes, no scope. Dependabot adds the colon.
+    commit-message:
+      prefix: "Chore"
     groups:
       actions:
         patterns: ["*"]
