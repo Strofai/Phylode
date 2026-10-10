@@ -46,6 +46,7 @@ Usage:
   phylode report [days]          weekly summary (7 days by default)
   phylode diagnostics            a report to paste into a bug report; holds no domains,
                                  addresses or names
+  phylode --version              show which version is installed
   phylode [--config <file>]      run Phylode in the foreground
 
 allow and block each undo the other, taking effect within seconds.";
@@ -89,6 +90,7 @@ enum Command {
     Uninstall,
     Forget,
     Help,
+    Version,
 }
 
 impl Command {
@@ -108,6 +110,7 @@ impl Command {
         match rest.as_slice() {
             [] => Ok(Self::Serve { config_path }),
             ["--help" | "-h" | "help"] => Ok(Self::Help),
+            ["--version" | "-V" | "version"] => Ok(Self::Version),
             ["status"] => Ok(Self::Status { config_path }),
             ["diagnostics"] => Ok(Self::Diagnostics { config_path }),
             ["install"] => Ok(Self::Install),
@@ -147,6 +150,10 @@ impl Command {
         match self {
             Self::Help => {
                 println!("{USAGE}");
+                ExitCode::SUCCESS
+            }
+            Self::Version => {
+                println!("Phylode {}", env!("CARGO_PKG_VERSION"));
                 ExitCode::SUCCESS
             }
             Self::Serve { config_path } => serve(&config_path),
@@ -994,6 +1001,21 @@ fn fingerprint<'a>(paths: impl IntoIterator<Item = &'a Path>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Should change: `--version`, `-V` and `version` ask for the version.
+    /// Should not change: an unknown word is still refused, with the usage.
+    #[test]
+    fn the_version_can_be_asked_for() {
+        for word in ["--version", "-V", "version"] {
+            let args = vec![word.to_string()];
+            assert!(
+                matches!(Command::parse(&args), Ok(Command::Version)),
+                "{word}"
+            );
+        }
+        let args = vec!["versions".to_string()];
+        assert!(Command::parse(&args).is_err());
+    }
 
     /// Should change: a count of 1 uses the singular form.
     /// Should not change: any other count uses the plural given, including irregular ones.

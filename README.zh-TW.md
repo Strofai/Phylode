@@ -111,6 +111,23 @@ phylode block example.com
 - `sudo phylode uninstall` 會關閉並移除 Phylode。你的設定、名單和記錄會留在 Mac 上。
 - `sudo phylode forget` 立刻刪除查詢記錄和存下來的每週摘要，Phylode 照常運作。
 
+## 更新 Phylode
+
+每個版本和它改了什麼都列在 [Releases](https://github.com/Strofai/Phylode/releases) 頁面。想在新版本推出時
+收到通知，在這個頁面上方選 Watch > Custom > Releases。Phylode 自己從不檢查更新，所以不會有任何關於你網路的
+資訊因此送出去。
+
+要更新時，在當初安裝的資料夾裡執行：
+
+```bash
+git pull
+cargo build --release
+sudo ./target/release/phylode install
+```
+
+`install` 會直接換掉正在執行的版本，中間不會中斷：Phylode 全程照常回應，你的設定、名單和查詢記錄都不變。
+`phylode --version` 會顯示目前安裝的版本。
+
 ## 遇到問題時
 
 執行 `phylode diagnostics`。它會顯示版本、狀態、數量和最近的事件，並移除網路位址和家目錄名稱，
@@ -148,8 +165,8 @@ phylode block example.com
 
 ## 開發狀態
 
-Phylode 已經能正常運作、每天都在使用，但還沒有正式版本：`main` 就是目前的版本。程式約 12,000 行
-Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 283 則。四個入口——裝置送來的封包、上游
+Phylode 已經能正常運作、每天都在使用。目前的版本是 1.0.0；`main` 每次改動都經過測試，可能比它新。程式約
+12,000 行 Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 284 則。四個入口——裝置送來的封包、上游
 回來的封包、封鎖名單的解析、設定檔的解析——由 GitHub Actions 工作流程進行模糊測試。
 
 接下來：由 Phylode 自己驗證收到的封包（目前由 DNS 函式庫負責）、macOS 沙箱設定，以及可選擇

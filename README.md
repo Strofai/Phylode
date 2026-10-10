@@ -128,6 +128,24 @@ You need an administrator account to change the lists.
 - `sudo phylode forget` deletes the query journal and the saved weekly summaries now,
   while Phylode keeps running.
 
+## Update Phylode
+
+Each version is listed on the [Releases](https://github.com/Strofai/Phylode/releases) page
+with what changed. To hear about new ones, choose Watch > Custom > Releases at the top of
+this page. Phylode never checks for updates itself, so nothing about your network leaves it.
+
+To update, in the folder you installed from:
+
+```bash
+git pull
+cargo build --release
+sudo ./target/release/phylode install
+```
+
+`install` replaces the running copy without a gap: Phylode keeps answering throughout, and
+your settings, lists and query journal stay as they are. `phylode --version` shows which
+version is installed.
+
 ## If something goes wrong
 
 Run `phylode diagnostics`. It shows versions, states, counts and recent events, with
@@ -179,9 +197,9 @@ browsing history of everyone on your network, and your settings.
 
 ## Project status
 
-Phylode works and runs every day, but there's no release yet: `main` is the current
-version. It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in
-`Cargo.lock`) and 283 tests. Four entry points — packets from devices, packets from
+Phylode works and runs every day. The current version is 1.0.0; `main` is tested on every
+change and may be ahead of it. It's about 12,000 lines of Rust with 11 direct dependencies
+(181 packages in `Cargo.lock`) and 284 tests. Four entry points — packets from devices, packets from
 upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
 GitHub Actions workflow.
 
