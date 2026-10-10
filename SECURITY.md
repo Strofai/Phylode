@@ -43,10 +43,13 @@ There are no releases yet. Only the latest `main` is supported.
   another's address can use up that device's allowance, leaving it unanswered for the
   rest of the minute. Apple's hard-coded hosts have an allowance of their own, so they
   keep resolving.
-- **DNSSEC is checked by the upstream, not passed on.** When the upstream reports that an
+- **DNSSEC is checked by the upstream and passed on.** When the upstream reports that an
   answer's signature did not validate, Phylode refuses it, as the upstream does, and names
-  the domain in the weekly summary; `phylode allow` lets a domain through anyway. Phylode
-  does not pass signatures on to devices, so a device cannot check them itself.
+  the domain in the weekly summary; `phylode allow` lets a domain through anyway. A device
+  that asks for signatures gets them, and the upstream's proof that a name doesn't exist,
+  unchanged, so it can check them itself. Answers Phylode writes itself — blocked domains,
+  names that exist only on the network — are unsigned, so a device that requires signatures
+  can't use them. Phylode does not validate signatures itself.
 - **Anyone on a served network can use it.** On a shared network, such as a café or a
   hotel, that includes strangers, and their queries are recorded in the query journal.
   Phylode is meant for a Mac that stays on one network; on a laptop that travels, run

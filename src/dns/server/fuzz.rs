@@ -35,8 +35,14 @@ impl Responder for PickedResponder {
         };
         match self.0 % 5 {
             0 => Response::Blocked { ttl },
-            1 => Response::NotFound { ttl },
-            2 => Response::NoRecords { ttl },
+            1 => Response::NotFound {
+                ttl,
+                proof: crate::dns::Proof::default(),
+            },
+            2 => Response::NoRecords {
+                ttl,
+                proof: crate::dns::Proof::default(),
+            },
             3 => Response::Failure,
             _ => Response::Ignored,
         }

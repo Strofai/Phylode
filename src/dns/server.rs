@@ -451,26 +451,31 @@ impl<R: Responder> Handler<R> {
         };
 
         match self.responder.respond(&query, request.src().ip()).await {
-            Response::Answer(records) => Reply::Answer(records),
+            Response::Answer(records) => Reply::Answer {
+                records,
+                asked: wire_type,
+            },
             Response::Blocked { ttl } => Reply::Blocked {
                 name: wire_name,
                 ttl,
                 record_type: wire_type,
             },
-            Response::NotFound { ttl } => Reply::Negative {
+            Response::NotFound { ttl, proof } => Reply::Negative {
                 name: wire_name,
                 ttl,
                 code: ResponseCode::NXDomain,
+                proof,
             },
             // The name exists and simply has no records of this type: NOERROR, an empty answer
             // section, and the SOA attached.
             // What breaks if you change it: returning NXDOMAIN here makes a device conclude an
             // IPv4-only site does not exist at all once it asks for AAAA, so it stops trying
             // IPv4 too.
-            Response::NoRecords { ttl } => Reply::Negative {
+            Response::NoRecords { ttl, proof } => Reply::Negative {
                 name: wire_name,
                 ttl,
                 code: ResponseCode::NoError,
+                proof,
             },
             Response::Failure => Reply::Code(ResponseCode::ServFail),
             Response::Ignored => Reply::Ignore,
@@ -515,7 +520,12 @@ fn parse(request: &Request) -> Result<(Query, WireName, WireRecordType), Reply> 
 }
 
 enum Reply {
-    Answer(super::Records),
+    /// An answer; which records go out depends on whether the device asked for signatures and
+    /// on the type it asked for.
+    Answer {
+        records: super::Records,
+        asked: WireRecordType,
+    },
     /// Blocked by a list: return an address nothing can connect to.
     Blocked {
         name: WireName,
@@ -523,10 +533,12 @@ enum Reply {
         record_type: WireRecordType,
     },
     /// A response with no answer: the attached SOA tells the device how long to remember it.
+    /// A device that asked for signatures gets the upstream's `proof` instead, when there is one.
     Negative {
         name: WireName,
         ttl: Duration,
         code: ResponseCode,
+        proof: super::Proof,
     },
     /// The fixed answer for ANY queries (RFC 8482).
     AnyHinfo {
@@ -566,13 +578,16 @@ fn blocked_record(name: &WireName, ttl: Duration, record_type: WireRecordType) -
 /// What breaks if you change it: set it higher and some large replies arrive as fragments that
 /// are lost on the way. Leave EDNS out of replies altogether and every answer over 512 bytes is
 /// truncated, sending the device to TCP, where the whole network shares a few connection slots.
-const MAX_UDP_PAYLOAD: u16 = 1232;
+pub(super) const MAX_UDP_PAYLOAD: u16 = 1232;
 
 /// The EDNS a reply carries when the query had one: the device's own size, within 512 and
-/// [`MAX_UDP_PAYLOAD`] — the same as the library's own server, plus the upper bound.
+/// [`MAX_UDP_PAYLOAD`] — the same as the library's own server, plus the upper bound — and the
+/// device's DO bit echoed back, which tells it the signatures it asked for are included
+/// (RFC 3225).
 fn reply_edns(requested: &Edns) -> Edns {
     let mut edns = Edns::new();
     edns.set_max_payload(requested.max_payload().clamp(512, MAX_UDP_PAYLOAD));
+    edns.set_dnssec_ok(requested.flags().dnssec_ok);
     edns
 }
 
@@ -582,6 +597,12 @@ async fn send<H: ResponseHandler>(
     reply: Reply,
 ) -> Result<ResponseInfo, NetError> {
     let edns = request.edns.as_ref().map(reply_edns);
+    // Whether the device asked for signatures: only then do they, and the upstream's proofs,
+    // go out (RFC 4035 §3.2.1).
+    let signatures = request
+        .edns
+        .as_ref()
+        .is_some_and(|edns| edns.flags().dnssec_ok);
     let mut builder = MessageResponseBuilder::from_message_request(request);
     if let Some(edns) = &edns {
         builder.edns(edns);
@@ -590,8 +611,10 @@ async fn send<H: ResponseHandler>(
     metadata.recursion_available = true;
 
     match reply {
-        Reply::Answer(records) => {
-            let message = builder.build(metadata, records.as_wire(), &[], &[], &[]);
+        Reply::Answer { records, asked } => {
+            let (answers, authority) = records.for_device(signatures, asked);
+            let message =
+                builder.build(metadata, answers.as_slice(), &[], authority.as_slice(), &[]);
             handle.send_response(message).await
         }
         Reply::Blocked {
@@ -614,12 +637,23 @@ async fn send<H: ResponseHandler>(
                 handle.send_response(message).await
             }
         },
-        Reply::Negative { name, ttl, code } => {
+        Reply::Negative {
+            name,
+            ttl,
+            code,
+            proof,
+        } => {
             metadata.response_code = code;
             // RFC 2308: a negative response needs an SOA, or the device has nothing to base its
-            // caching on and will mostly just keep asking.
-            let soa = vec![negative_soa(&name, ttl)];
-            let message = builder.build(metadata, &[], &[], soa.as_slice(), &[]);
+            // caching on and will mostly just keep asking. A device that validates signatures
+            // gets the upstream's own SOA and proof instead: one made up here is unsigned, and
+            // proves nothing to it.
+            let authority = if signatures && !proof.as_wire().is_empty() {
+                proof.as_wire().to_vec()
+            } else {
+                vec![negative_soa(&name, ttl)]
+            };
+            let message = builder.build(metadata, &[], &[], authority.as_slice(), &[]);
             handle.send_response(message).await
         }
         Reply::AnyHinfo { name } => {
@@ -684,6 +718,7 @@ mod tests {
         async fn respond(&self, _query: &Query, _client: IpAddr) -> Response {
             Response::NotFound {
                 ttl: Duration::from_secs(2),
+                proof: crate::dns::Proof::default(),
             }
         }
 
@@ -720,6 +755,7 @@ mod tests {
         async fn respond(&self, _query: &Query, _client: IpAddr) -> Response {
             Response::NotFound {
                 ttl: Duration::from_secs(2),
+                proof: crate::dns::Proof::default(),
             }
         }
 
@@ -750,6 +786,7 @@ mod tests {
             self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Response::NotFound {
                 ttl: Duration::from_secs(2),
+                proof: crate::dns::Proof::default(),
             }
         }
 
@@ -1052,6 +1089,82 @@ mod tests {
         assert!(!reply.metadata.truncation);
         assert_eq!(reply.answers.len(), 40);
         assert_eq!(reply.edns.map(|edns| edns.max_payload()), Some(1232));
+    }
+
+    /// A responder with the upstream's signatures and proofs: a signed answer for A queries,
+    /// "does not exist" with the zone's signed SOA for anything else.
+    struct Signed;
+
+    impl Responder for Signed {
+        async fn respond(&self, query: &Query, _client: IpAddr) -> Response {
+            if query.record_type() == RecordType::A {
+                return Response::Answer(crate::dns::Records::signed(
+                    query.name(),
+                    IpAddr::from([203, 0, 113, 9]),
+                ));
+            }
+            Response::NotFound {
+                ttl: Duration::from_secs(600),
+                proof: crate::dns::Proof::for_zone(&Name::parse("example.com")),
+            }
+        }
+
+        fn admits(&self, _client: IpAddr) -> bool {
+            true
+        }
+    }
+
+    /// Sends a query for `name` and `kind` over UDP, with the DO bit set or clear.
+    async fn ask_signed(
+        server: SocketAddr,
+        name: &str,
+        kind: WireRecordType,
+        dnssec: bool,
+    ) -> Message {
+        let mut query = Message::query();
+        query.add_query(WireQuery::query(name.parse().unwrap(), kind));
+        let mut edns = Edns::new();
+        edns.set_max_payload(1232);
+        edns.set_dnssec_ok(dnssec);
+        query.set_edns(edns);
+        let reply = udp_ask(server, &query.to_vec().unwrap()).await.unwrap();
+        Message::from_vec(&reply).unwrap()
+    }
+
+    /// Should change: a device that sets the DO bit gets the answer's signature and the
+    /// upstream's proof, a negative answer comes with the zone's own signed SOA instead of one
+    /// made up here, and the DO bit is echoed back.
+    /// Should not change: a device that does not set it gets the bare answer, no authority
+    /// section, the SOA made up here for a negative answer, and no DO bit — as before signatures
+    /// were kept.
+    #[tokio::test]
+    async fn signatures_go_only_to_devices_that_ask_for_them() {
+        let server = udp_server(Arc::new(Signed)).await;
+        let dnssec_ok = |reply: &Message| reply.edns.as_ref().map(|edns| edns.flags().dnssec_ok);
+
+        let signed = ask_signed(server, "www.example.com.", WireRecordType::A, true).await;
+        let kinds: Vec<_> = signed.answers.iter().map(Record::record_type).collect();
+        assert_eq!(kinds, [WireRecordType::A, WireRecordType::RRSIG]);
+        assert_eq!(signed.authorities.len(), 1);
+        assert_eq!(signed.authorities[0].record_type(), WireRecordType::NSEC);
+        assert_eq!(dnssec_ok(&signed), Some(true));
+
+        let plain = ask_signed(server, "www.example.com.", WireRecordType::A, false).await;
+        let kinds: Vec<_> = plain.answers.iter().map(Record::record_type).collect();
+        assert_eq!(kinds, [WireRecordType::A]);
+        assert!(plain.authorities.is_empty());
+        assert_eq!(dnssec_ok(&plain), Some(false));
+
+        let proven = ask_signed(server, "gone.example.com.", WireRecordType::AAAA, true).await;
+        assert_eq!(proven.metadata.response_code, ResponseCode::NXDomain);
+        let kinds: Vec<_> = proven.authorities.iter().map(Record::record_type).collect();
+        assert_eq!(kinds, [WireRecordType::SOA, WireRecordType::RRSIG]);
+        assert_eq!(proven.authorities[0].name.to_ascii(), "example.com.");
+
+        let unproven = ask_signed(server, "gone.example.com.", WireRecordType::AAAA, false).await;
+        assert_eq!(unproven.metadata.response_code, ResponseCode::NXDomain);
+        assert_eq!(unproven.authorities.len(), 1);
+        assert_eq!(unproven.authorities[0].name.to_ascii(), "gone.example.com.");
     }
 
     /// Should change: a message that is itself a response gets no reply, so a forged one cannot

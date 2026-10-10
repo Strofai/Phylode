@@ -154,6 +154,11 @@ browsing history of everyone on your network, and your settings.
   blocked each day) in `/usr/local/etc/phylode.conf` and run `sudo phylode install`. The
   weekly summary says "cannot tell" for whatever it can no longer see. A change applies from
   then on; what is already kept stays until it expires, and `phylode status` says until when.
+- **Apps that check signatures keep working.** Some apps ask the device to verify each
+  answer's DNSSEC signature (Apple's `requiresDNSSECValidation`). Phylode passes the
+  signatures, and the proof that a name doesn't exist, on unchanged to any device that asks
+  for them, so these apps connect as they would on any other network. Blocked domains get
+  an unsigned answer, so such an app can't reach them either.
 - **Allowing works right away.** Devices remember a blocked answer for only 2 seconds.
 - **Devices aren't pushed to another DNS server.** Phylode never answers REFUSED, which
   would make devices switch servers and stop being filtered. A device sending too many
@@ -176,7 +181,7 @@ browsing history of everyone on your network, and your settings.
 
 Phylode works and runs every day, but there's no release yet: `main` is the current
 version. It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in
-`Cargo.lock`) and 277 tests. Four entry points — packets from devices, packets from
+`Cargo.lock`) and 283 tests. Four entry points — packets from devices, packets from
 upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
 GitHub Actions workflow.
 

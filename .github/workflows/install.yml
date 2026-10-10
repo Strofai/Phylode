@@ -345,6 +345,45 @@ jobs:
           echo "loopback: $name in plaintext (control); outside: $encrypted packets to an encrypted upstream,"
           echo "$handshakes of them TLS handshake records, no plaintext DNS to it, and $name nowhere in the capture"
 
+      # An app that requires DNSSEC validation treats an answer it cannot validate as none at
+      # all, unsigned domains included. 1.1.1.1 is the control: if the probe fails there, the
+      # runner's network is the cause, not Phylode.
+      - name: Apps that require DNSSEC validation connect through Phylode
+        run: |
+          cat > "$RUNNER_TEMP/validating.swift" <<'EOF'
+          import Foundation
+          var failed = 0
+          for target in CommandLine.arguments.dropFirst() {
+              let configuration = URLSessionConfiguration.ephemeral
+              configuration.requiresDNSSECValidation = true
+              var request = URLRequest(url: URL(string: target)!)
+              request.requiresDNSSECValidation = true
+              request.timeoutInterval = 30
+              do {
+                  _ = try await URLSession(configuration: configuration).data(for: request)
+                  print("\(target): connected")
+              } catch {
+                  print("\(target): failed \((error as NSError).code)")
+                  failed += 1
+              }
+          }
+          exit(failed == 0 ? 0 : 1)
+          EOF
+          # Two signed domains and two unsigned ones.
+          sites="https://www.isc.org https://www.cloudflare.com https://github.com https://www.apple.com"
+          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          sudo networksetup -setdnsservers "$service" 1.1.1.1
+          sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+          swift "$RUNNER_TEMP/validating.swift" $sites \
+            || { echo "::error::the probe failed with 1.1.1.1 too, so this run cannot tell"; exit 1; }
+          sudo networksetup -setdnsservers "$service" empty
+          sudo phylode on
+          sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+          swift "$RUNNER_TEMP/validating.swift" $sites \
+            || { echo "::error::an app requiring DNSSEC validation could not connect through Phylode"; sudo phylode off; exit 1; }
+          sudo phylode off
+          sudo networksetup -setdnsservers "$service" empty
+
       - name: on and off switch this Mac's DNS
         # A negated command (! cmd) never fails a step under set -e, so each check is explicit.
         run: |

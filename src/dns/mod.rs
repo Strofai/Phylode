@@ -30,12 +30,15 @@ pub use server::{LAUNCHD_TCP_SOCKET, LAUNCHD_UDP_SOCKET, Listener, serve};
 pub use server::fuzz::request as fuzz_request;
 
 /// Fuzz entry point: treats arbitrary bytes as a packet from upstream and extracts the answer
-/// section, returning `None` if it does not parse. Only compiled under `cargo fuzz`; what
+/// and authority sections, returning `None` if it does not parse. Only compiled under `cargo fuzz`; what
 /// happens next goes through the public interface in `fuzz/fuzz_targets/upstream.rs`.
 #[cfg(fuzzing)]
 pub fn fuzz_upstream_records(data: &[u8]) -> Option<Records> {
     let message = hickory_proto::op::Message::from_vec(data).ok()?;
-    Some(Records::from_wire(message.answers.to_vec()))
+    Some(Records::from_wire(
+        message.answers.to_vec(),
+        message.authorities.to_vec(),
+    ))
 }
 
 /// A DNS domain name. Always lowercase with no trailing dot, so comparison is
@@ -139,62 +142,154 @@ impl Query {
     }
 }
 
-/// A record set from upstream or the cache. The contents are not exposed; it is passed around
-/// whole.
+/// Returns a copy of `records` with `elapsed` subtracted from each TTL, floored at one second.
+///
+/// Used when serving from cache. What breaks if you change it: returning the TTL as stored
+/// makes the device start counting from the moment it receives the answer, keeping it for
+/// longer than the authoritative server allowed. Shortening a TTL leaves signatures valid: a
+/// validator checks the original TTL the signature carries (RFC 4035 §5.3.3).
+fn aged_copy(records: &[Record], elapsed: Duration) -> Vec<Record> {
+    let seconds = u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX);
+    records
+        .iter()
+        .map(|record| {
+            let mut aged = record.clone();
+            aged.ttl = aged.ttl.saturating_sub(seconds).max(1);
+            aged
+        })
+        .collect()
+}
+
+/// Roughly how many bytes of memory `records` occupy: each record's fixed size plus its
+/// encoded length, which tracks the names and data it holds on the heap. A record that
+/// cannot be encoded counts as unboundedly large.
+///
+/// What breaks if you change it: counting the wire size alone undercounts an answer of
+/// many small records several times over, and the cache's memory bound stops holding.
+fn memory_of(records: &[Record]) -> usize {
+    use hickory_proto::serialize::binary::BinEncodable;
+
+    records.iter().fold(0, |total, record| {
+        let encoded = record.to_bytes().map_or(usize::MAX, |bytes| bytes.len());
+        total
+            .saturating_add(std::mem::size_of::<Record>())
+            .saturating_add(encoded)
+    })
+}
+
+/// Signatures and the records that prove a name or type does not exist. A device gets these
+/// only when its query asks for signatures; otherwise they are left out unless they are the
+/// type it asked for (RFC 4035 §3.2.1).
+fn is_signature_evidence(record_type: WireRecordType) -> bool {
+    matches!(
+        record_type,
+        WireRecordType::RRSIG | WireRecordType::NSEC | WireRecordType::NSEC3
+    )
+}
+
+/// The authority section an upstream sent with its answer, kept so a device that validates
+/// signatures can check it: for a negative answer the zone's SOA and the NSEC/NSEC3 records
+/// proving the name or type does not exist, for a wildcard answer the proof that no closer
+/// name exists, each with its signatures. Passed on unchanged apart from TTLs.
+///
+/// What breaks if you change it: drop or rewrite any record here and a validating device can
+/// prove nothing, so it treats the answer as never received — including for unsigned domains,
+/// whose "this zone is unsigned" proof is itself a signed negative answer.
 #[derive(Clone, Debug, Default)]
-pub struct Records(Vec<Record>);
+pub struct Proof(Vec<Record>);
+
+impl Proof {
+    /// Takes an upstream's authority section, cutting every TTL down to `ceiling`.
+    fn from_wire(mut records: Vec<Record>, ceiling: u32) -> Self {
+        for record in &mut records {
+            record.ttl = record.ttl.min(ceiling);
+        }
+        Self(records)
+    }
+
+    /// See [`aged_copy`].
+    pub fn aged(&self, elapsed: Duration) -> Self {
+        Self(aged_copy(&self.0, elapsed))
+    }
+
+    /// See [`memory_of`].
+    pub fn memory_estimate(&self) -> usize {
+        memory_of(&self.0)
+    }
+
+    fn as_wire(&self) -> &[Record] {
+        &self.0
+    }
+
+    /// Test only: the zone's SOA and its signature, as an upstream sends with a negative answer
+    /// to a query with the DO bit.
+    #[cfg(test)]
+    pub fn for_zone(zone: &Name) -> Self {
+        use hickory_proto::rr::rdata::SOA;
+
+        let owner: hickory_proto::rr::Name =
+            format!("{zone}.").parse().expect("test names should parse");
+        let soa = SOA::new(owner.clone(), owner.clone(), 1, 7200, 3600, 86_400, 3600);
+        Self(vec![
+            Record::from_rdata(owner, 3600, RData::SOA(soa)),
+            test_signature(zone, WireRecordType::RRSIG),
+        ])
+    }
+}
+
+/// Test only: a record of a DNSSEC type with placeholder data. This library is built without
+/// DNSSEC support, so such records travel as opaque bytes — the same as real ones from upstream.
+#[cfg(test)]
+fn test_signature(name: &Name, kind: WireRecordType) -> Record {
+    use hickory_proto::rr::rdata::NULL;
+
+    let owner: hickory_proto::rr::Name =
+        format!("{name}.").parse().expect("test names should parse");
+    let data = RData::Unknown {
+        code: kind,
+        rdata: NULL::with(vec![0, 1, 13, 2, 0, 0, 14, 16]),
+    };
+    Record::from_rdata(owner, 300, data)
+}
+
+/// A record set from upstream or the cache: the answer, and the proof that came with it. The
+/// contents are not exposed; it is passed around whole.
+#[derive(Clone, Debug, Default)]
+pub struct Records {
+    answers: Vec<Record>,
+    proof: Proof,
+}
 
 impl Records {
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.answers.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.answers.len()
     }
 
-    /// The smallest TTL in this set, which decides how long it is cached. `None` when empty.
+    /// The smallest TTL in this set, proof included, which decides how long it is cached.
+    /// `None` when empty.
     pub fn min_ttl(&self) -> Option<Duration> {
-        self.0
+        self.answers
             .iter()
+            .chain(self.proof.as_wire())
             .map(|record| Duration::from_secs(u64::from(record.ttl)))
             .min()
     }
 
-    /// Returns a copy with `elapsed` subtracted from each TTL, floored at one second.
-    ///
-    /// Used when serving from cache. What breaks if you change it: returning the TTL as stored
-    /// makes the device start counting from the moment it receives the answer, keeping it for
-    /// longer than the authoritative server allowed.
+    /// See [`aged_copy`].
     pub fn aged(&self, elapsed: Duration) -> Self {
-        let seconds = u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX);
-        Self(
-            self.0
-                .iter()
-                .map(|record| {
-                    let mut aged = record.clone();
-                    aged.ttl = aged.ttl.saturating_sub(seconds).max(1);
-                    aged
-                })
-                .collect(),
-        )
+        Self {
+            answers: aged_copy(&self.answers, elapsed),
+            proof: self.proof.aged(elapsed),
+        }
     }
 
-    /// Roughly how many bytes of memory this set occupies: each record's fixed size plus its
-    /// encoded length, which tracks the names and data it holds on the heap. A record that
-    /// cannot be encoded counts as unboundedly large.
-    ///
-    /// What breaks if you change it: counting the wire size alone undercounts an answer of
-    /// many small records several times over, and the cache's memory bound stops holding.
+    /// See [`memory_of`].
     pub fn memory_estimate(&self) -> usize {
-        use hickory_proto::serialize::binary::BinEncodable;
-
-        self.0.iter().fold(0, |total, record| {
-            let encoded = record.to_bytes().map_or(usize::MAX, |bytes| bytes.len());
-            total
-                .saturating_add(std::mem::size_of::<Record>())
-                .saturating_add(encoded)
-        })
+        memory_of(&self.answers).saturating_add(self.proof.memory_estimate())
     }
 
     /// Every address in this set a device might connect to: A/AAAA, plus the `ipv4hint` and
@@ -221,7 +316,7 @@ impl Records {
                 })
                 .collect()
         };
-        self.0
+        self.answers
             .iter()
             .flat_map(|record| match &record.data {
                 RData::A(a) => vec![IpAddr::V4(a.0)],
@@ -246,7 +341,7 @@ impl Records {
     /// blocklist. The library's `to_string` decodes punycode to Unicode, which no blocklist
     /// entry is written in, so an internationalized tracker behind an alias would pass.
     pub fn alias_targets(&self) -> Vec<String> {
-        self.0
+        self.answers
             .iter()
             .filter_map(|record| match &record.data {
                 RData::CNAME(target) => Some(&target.0),
@@ -271,7 +366,7 @@ impl Records {
         let wire: hickory_proto::rr::Name =
             format!("{name}.").parse().expect("test names should parse");
         let seconds = u32::try_from(ttl.as_secs()).unwrap_or(u32::MAX);
-        Self(
+        Self::answers_only(
             addresses
                 .iter()
                 .map(|address| {
@@ -302,8 +397,8 @@ impl Records {
             seconds,
             RData::CNAME(CNAME(target_wire.clone())),
         )];
-        records.extend(Self::from_addresses(&Name::parse(target), ttl, &[address]).0);
-        Self(records)
+        records.extend(Self::from_addresses(&Name::parse(target), ttl, &[address]).answers);
+        Self::answers_only(records)
     }
 
     /// Test only: an HTTPS (or, with `https` false, SVCB) record for `name` sending devices
@@ -327,23 +422,65 @@ impl Records {
         } else {
             RData::SVCB(svcb)
         };
-        Self(vec![Record::from_rdata(owner, 300, data)])
+        Self::answers_only(vec![Record::from_rdata(owner, 300, data)])
     }
 
-    /// Takes an upstream's records, cutting any TTL above a day down to a day.
+    /// Test only: `name` resolves to `address`, signed, with an NSEC record in the authority
+    /// section — the shape of a signed wildcard answer as an upstream sends it to a query with
+    /// the DO bit.
+    #[cfg(test)]
+    pub fn signed(name: &Name, address: IpAddr) -> Self {
+        let mut records = Self::from_addresses(name, Duration::from_secs(300), &[address]);
+        records
+            .answers
+            .push(test_signature(name, WireRecordType::RRSIG));
+        records.proof = Proof(vec![test_signature(name, WireRecordType::NSEC)]);
+        records
+    }
+
+    /// Test only: an answer with no proof.
+    #[cfg(test)]
+    fn answers_only(answers: Vec<Record>) -> Self {
+        Self {
+            answers,
+            proof: Proof::default(),
+        }
+    }
+
+    /// Takes an upstream's answer and authority sections, cutting any TTL above a day down to a
+    /// day.
     ///
     /// What breaks if you change it: devices keep an answer for as long as its TTL says,
     /// whatever happens here; a week-long TTL means a domain added to a list today stays
     /// reachable on those devices for a week. A day matches the daily list update.
-    fn from_wire(mut records: Vec<Record>) -> Self {
-        for record in &mut records {
+    fn from_wire(mut answers: Vec<Record>, authority: Vec<Record>) -> Self {
+        for record in &mut answers {
             record.ttl = record.ttl.min(MAX_ANSWER_TTL);
         }
-        Self(records)
+        Self {
+            answers,
+            proof: Proof::from_wire(authority, MAX_ANSWER_TTL),
+        }
     }
 
-    fn as_wire(&self) -> &[Record] {
-        &self.0
+    /// The answer and authority sections for one device. A device that asked for signatures
+    /// gets everything the upstream sent; any other gets the answer without signatures or
+    /// proofs (unless it asked for that type) and no authority section, exactly as before
+    /// signatures were kept.
+    fn for_device(&self, signatures: bool, asked: WireRecordType) -> (Vec<Record>, Vec<Record>) {
+        if signatures {
+            return (self.answers.clone(), self.proof.as_wire().to_vec());
+        }
+        let answers = self
+            .answers
+            .iter()
+            .filter(|record| {
+                let kind = record.record_type();
+                kind == asked || !is_signature_evidence(kind)
+            })
+            .cloned()
+            .collect();
+        (answers, Vec::new())
     }
 }
 
@@ -357,11 +494,12 @@ impl Records {
 pub enum Answer {
     /// Records were returned.
     Records(Records),
-    /// The upstream says this name does not exist (NXDOMAIN).
-    NameNotFound { ttl: Duration },
+    /// The upstream says this name does not exist (NXDOMAIN). `proof` is what it sent to show
+    /// that, for devices that validate signatures.
+    NameNotFound { ttl: Duration, proof: Proof },
     /// The upstream says the name exists but has no records of this type (RFC 2308 NODATA).
     /// An IPv4-only domain asked for AAAA lands here, which is very common.
-    NoRecordsOfType { ttl: Duration },
+    NoRecordsOfType { ttl: Duration, proof: Proof },
     /// The upstream answered, and answered SERVFAIL (including on the CD retry). **This
     /// upstream is not broken** — usually that domain's own name servers are, and the next
     /// upstream would say the same.
@@ -384,11 +522,12 @@ pub enum Response {
     /// This matches Cloudflare: 1.1.1.1 for Families and Cloudflare Gateway return `0.0.0.0`
     /// by default.
     Blocked { ttl: Duration },
-    /// The name does not exist; `ttl` decides how long the device remembers that.
-    NotFound { ttl: Duration },
+    /// The name does not exist; `ttl` decides how long the device remembers that. `proof` is
+    /// the upstream's evidence, empty when Phylode answered by itself.
+    NotFound { ttl: Duration, proof: Proof },
     /// The name exists but has no records of this type. Returns NOERROR with an SOA and no
-    /// answer records.
-    NoRecords { ttl: Duration },
+    /// answer records; `proof` as for `NotFound`.
+    NoRecords { ttl: Duration, proof: Proof },
     /// A server-side failure (every upstream down and nothing in the cache).
     Failure,
     /// Return nothing at all. Used for a source outside the served networks and for a device
@@ -416,6 +555,43 @@ pub trait Responder: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Should change: time spent in the cache comes off the proof's TTLs too, so a validating
+    /// device does not keep a negative answer longer than any other.
+    /// Should not change: the proof's records, their order and their data.
+    #[test]
+    fn a_proof_ages_with_its_answer() {
+        let proof = Proof::for_zone(&Name::parse("example.com"));
+        let aged = proof.aged(Duration::from_secs(100));
+        let ttls: Vec<u32> = aged.as_wire().iter().map(|record| record.ttl).collect();
+        assert_eq!(ttls, [3500, 200]);
+        let before: Vec<_> = proof.as_wire().iter().map(|r| r.data.clone()).collect();
+        let after: Vec<_> = aged.as_wire().iter().map(|r| r.data.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    /// Should change: a device that asked for signatures gets them, and the proof.
+    /// Should not change: any other device gets the answer without signatures or proof, unless
+    /// signatures are the type it asked for.
+    #[test]
+    fn signatures_are_handed_only_to_devices_that_ask() {
+        let name = Name::parse("www.example.com");
+        let records = Records::signed(&name, "203.0.113.9".parse().unwrap());
+        let kinds = |records: &[Record]| -> Vec<WireRecordType> {
+            records.iter().map(Record::record_type).collect()
+        };
+
+        let (answers, authority) = records.for_device(true, WireRecordType::A);
+        assert_eq!(kinds(&answers), [WireRecordType::A, WireRecordType::RRSIG]);
+        assert_eq!(kinds(&authority), [WireRecordType::NSEC]);
+
+        let (answers, authority) = records.for_device(false, WireRecordType::A);
+        assert_eq!(kinds(&answers), [WireRecordType::A]);
+        assert!(authority.is_empty());
+
+        let (answers, _) = records.for_device(false, WireRecordType::RRSIG);
+        assert_eq!(kinds(&answers), [WireRecordType::A, WireRecordType::RRSIG]);
+    }
 
     #[test]
     fn names_are_lowercased_and_lose_the_trailing_dot() {
@@ -496,10 +672,13 @@ mod tests {
                 SvcParamValue::Ipv4Hint(IpHint(vec![A::new(192, 168, 0, 1)])),
             )],
         );
-        let records = Records::from_wire(vec![
-            Record::from_rdata(wire.clone(), 300, RData::HTTPS(HTTPS(https))),
-            Record::from_rdata(wire, 300, RData::A(A::new(93, 184, 216, 34))),
-        ]);
+        let records = Records::from_wire(
+            vec![
+                Record::from_rdata(wire.clone(), 300, RData::HTTPS(HTTPS(https))),
+                Record::from_rdata(wire, 300, RData::A(A::new(93, 184, 216, 34))),
+            ],
+            Vec::new(),
+        );
         let addresses = records.addresses();
         assert!(addresses.contains(&"192.168.0.1".parse().unwrap()));
         assert!(addresses.contains(&"93.184.216.34".parse().unwrap()));
@@ -551,11 +730,11 @@ mod tests {
             )]
         };
         assert_eq!(
-            Records::from_wire(records(604_800)).min_ttl(),
+            Records::from_wire(records(604_800), Vec::new()).min_ttl(),
             Some(Duration::from_secs(86_400))
         );
         assert_eq!(
-            Records::from_wire(records(300)).min_ttl(),
+            Records::from_wire(records(300), Vec::new()).min_ttl(),
             Some(Duration::from_secs(300))
         );
     }

@@ -131,6 +131,9 @@ phylode block example.com
   `/usr/local/etc/phylode.conf` 設 `journal = Domains`（不記裝置）或 `journal = Zero`（只記每天允許
   和封鎖了幾次），再執行 `sudo phylode install`。週報裡因此看不出來的項目會寫明 `Cannot tell`。
   改了之後只影響之後的記錄；已經記下的會留到過期，`phylode status` 會寫到哪一天。
+- **會檢查簽章的 App 照常運作。** 有些 App 會要求裝置驗證每個回應的 DNSSEC 簽章（Apple 的
+  `requiresDNSSECValidation`）。Phylode 會把簽章，以及「這個名稱不存在」的證明，原封不動交給有要求的裝置，
+  所以這些 App 跟在其他網路上一樣連得上。被封鎖的網域收到的是沒有簽章的回應，這類 App 一樣連不上。
 - **允許立即生效。** 裝置只會記住封鎖結果 2 秒。
 - **不把裝置推向其他 DNS 伺服器。** Phylode 絕不回覆 REFUSED，因為這會讓裝置改用其他伺服器而不再
   被過濾。查詢次數過多的裝置，或不在服務範圍內的來源，完全收不到回應。
@@ -146,7 +149,7 @@ phylode block example.com
 ## 開發狀態
 
 Phylode 已經能正常運作、每天都在使用，但還沒有正式版本：`main` 就是目前的版本。程式約 12,000 行
-Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 277 則。四個入口——裝置送來的封包、上游
+Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 283 則。四個入口——裝置送來的封包、上游
 回來的封包、封鎖名單的解析、設定檔的解析——由 GitHub Actions 工作流程進行模糊測試。
 
 接下來：由 Phylode 自己驗證收到的封包（目前由 DNS 函式庫負責）、macOS 沙箱設定，以及可選擇

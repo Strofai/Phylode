@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::cache::{Cache, Cached, Hit};
-use crate::dns::{Answer, Query, RecordType, Responder, Response, Signature};
+use crate::dns::{Answer, Proof, Query, RecordType, Responder, Response, Signature};
 use crate::health;
 use crate::journal::{Disposition, EventKind, Journal, Record, USER_ALLOWED};
 use crate::policy::{
@@ -157,6 +157,7 @@ impl Gatekeeper {
         (
             Response::NoRecords {
                 ttl: self.block_ttl,
+                proof: Proof::default(),
             },
             Disposition::Rebind,
         )
@@ -204,19 +205,25 @@ impl Gatekeeper {
                 }
                 (Response::Answer(records), disposition)
             }
-            Answer::NameNotFound { ttl } => {
+            Answer::NameNotFound { ttl, proof } => {
                 if cacheable {
-                    self.cache
-                        .insert(query.clone(), Cached::NameNotFound { ttl });
+                    let cached = Cached::NameNotFound {
+                        ttl,
+                        proof: proof.clone(),
+                    };
+                    self.cache.insert(query.clone(), cached);
                 }
-                (Response::NotFound { ttl }, disposition)
+                (Response::NotFound { ttl, proof }, disposition)
             }
-            Answer::NoRecordsOfType { ttl } => {
+            Answer::NoRecordsOfType { ttl, proof } => {
                 if cacheable {
-                    self.cache
-                        .insert(query.clone(), Cached::NoRecordsOfType { ttl });
+                    let cached = Cached::NoRecordsOfType {
+                        ttl,
+                        proof: proof.clone(),
+                    };
+                    self.cache.insert(query.clone(), cached);
                 }
-                (Response::NoRecords { ttl }, disposition)
+                (Response::NoRecords { ttl, proof }, disposition)
             }
             // The upstream answered, and answered with a failure. **This is not the upstream
             // being down**; report the failure honestly and let the journal name who failed.
@@ -325,8 +332,8 @@ fn reason_for(disposition: Disposition, from_caller: Cow<'static, str>) -> Cow<'
 fn response_of(cached: Cached) -> Response {
     match cached {
         Cached::Records(records) => Response::Answer(records),
-        Cached::NameNotFound { ttl } => Response::NotFound { ttl },
-        Cached::NoRecordsOfType { ttl } => Response::NoRecords { ttl },
+        Cached::NameNotFound { ttl, proof } => Response::NotFound { ttl, proof },
+        Cached::NoRecordsOfType { ttl, proof } => Response::NoRecords { ttl, proof },
     }
 }
 
@@ -375,6 +382,7 @@ impl Responder for Gatekeeper {
             let _ = self.cache.get(query);
             return Response::NotFound {
                 ttl: self.block_ttl,
+                proof: Proof::default(),
             };
         }
 
@@ -404,6 +412,7 @@ impl Responder for Gatekeeper {
             );
             return Response::NotFound {
                 ttl: self.block_ttl,
+                proof: Proof::default(),
             };
         }
 
@@ -1112,7 +1121,7 @@ mod tests {
             gatekeeper.deliver(&q, answer, CacheWrite::Allowed, Signature::NotFlagged);
 
         assert!(
-            matches!(response, Response::NoRecords { ttl } if ttl == Duration::from_secs(2)),
+            matches!(response, Response::NoRecords { ttl, .. } if ttl == Duration::from_secs(2)),
             "should be NOERROR with an SOA and a short TTL; got {response:?}"
         );
         assert_eq!(disposition, Disposition::Rebind);
@@ -1160,14 +1169,20 @@ mod tests {
 
         let (response, _) = gatekeeper.deliver(
             &typo,
-            Answer::NameNotFound { ttl },
+            Answer::NameNotFound {
+                ttl,
+                proof: Proof::default(),
+            },
             CacheWrite::Allowed,
             Signature::NotFlagged,
         );
-        assert!(matches!(response, Response::NotFound { ttl: t } if t == ttl));
+        assert!(matches!(response, Response::NotFound { ttl: t, .. } if t == ttl));
         gatekeeper.deliver(
             &ipv4_only,
-            Answer::NoRecordsOfType { ttl },
+            Answer::NoRecordsOfType {
+                ttl,
+                proof: Proof::default(),
+            },
             CacheWrite::Allowed,
             Signature::NotFlagged,
         );
@@ -1205,13 +1220,19 @@ mod tests {
 
         gatekeeper.deliver(
             &q,
-            Answer::NameNotFound { ttl },
+            Answer::NameNotFound {
+                ttl,
+                proof: Proof::default(),
+            },
             CacheWrite::Forbidden,
             Signature::NotFlagged,
         );
         gatekeeper.deliver(
             &q,
-            Answer::NameNotFound { ttl },
+            Answer::NameNotFound {
+                ttl,
+                proof: Proof::default(),
+            },
             CacheWrite::Allowed,
             Signature::Bogus,
         );

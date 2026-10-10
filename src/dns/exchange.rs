@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use hickory_proto::op::{
-    DnsRequest, DnsRequestOptions, DnsResponse, Message, Query as WireQuery, ResponseCode,
+    DnsRequest, DnsRequestOptions, DnsResponse, Edns, Message, Query as WireQuery, ResponseCode,
 };
 use hickory_proto::rr::{Name as WireName, RecordType as WireRecordType};
 use hickory_resolver::config::{NameServerConfig, ResolverOpts};
@@ -23,7 +23,7 @@ use hickory_resolver::{NameServerPool, PoolContext, TlsConfig};
 use hickory_server::net::{DnsError, NetError, NoRecords};
 use thiserror::Error;
 
-use super::{Answer, Query, RecordType, Records};
+use super::{Answer, Proof, Query, RecordType, Records};
 use crate::config::{Upstream, UpstreamProtocol};
 
 /// How long one outbound query waits on one upstream. On timeout it moves to the next
@@ -184,6 +184,7 @@ impl Exchange {
         ));
         message.metadata.recursion_desired = true;
         message.metadata.checking_disabled = checking_disabled;
+        message.set_edns(signatures_requested());
         let request = DnsRequest::new(message, DnsRequestOptions::default());
         match self.pool.send(request).next().await {
             Some(result) => result,
@@ -195,6 +196,7 @@ impl Exchange {
         match result {
             Ok(response) => Ok(Answer::Records(Records::from_wire(
                 response.answers.to_vec(),
+                response.authorities.to_vec(),
             ))),
             Err(NetError::Dns(DnsError::NoRecordsFound(empty))) => Ok(negative(&empty)),
             // Any other response code (REFUSED, NOTIMP, FORMERR…) is still an answer: counted
@@ -217,6 +219,20 @@ fn is_server_failure(result: &Result<DnsResponse, NetError>) -> bool {
     )
 }
 
+/// The EDNS every upstream query carries: the DO bit, so the upstream includes signatures and
+/// the records proving a name or type does not exist (RFC 3225; RFC 4035 §3.2.1), and the same
+/// UDP size this server offers devices. Set on every query whether or not the device validates,
+/// so one cached copy serves both kinds of device.
+///
+/// What breaks if you change it: without the DO bit the upstream sends no signatures, and every
+/// device that validates them (Apple's `requiresDNSSECValidation`) can reach nothing at all.
+fn signatures_requested() -> Edns {
+    let mut edns = Edns::new();
+    edns.set_max_payload(super::server::MAX_UDP_PAYLOAD);
+    edns.set_dnssec_ok(true);
+    edns
+}
+
 /// Used when the upstream gives no negative caching time.
 ///
 /// ⚠️ Ours, with no industry source. Short is safer than long: a newly registered domain
@@ -231,15 +247,24 @@ const DEFAULT_NEGATIVE_TTL: Duration = Duration::from_secs(60);
 const MAX_NEGATIVE_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Translates an upstream's negative response into an answer. The response code decides
-/// between "the name does not exist" and "no records of that type".
+/// between "the name does not exist" and "no records of that type". The proof keeps the
+/// upstream's authority section with its TTLs cut to the same limit, so a device that
+/// validates signatures remembers the answer no longer than any other device.
 fn negative(empty: &NoRecords) -> Answer {
     let ttl = empty.negative_ttl.map_or(DEFAULT_NEGATIVE_TTL, |seconds| {
         Duration::from_secs(u64::from(seconds)).min(MAX_NEGATIVE_TTL)
     });
+    let ceiling = u32::try_from(ttl.as_secs()).unwrap_or(u32::MAX);
+    let authority = empty
+        .authorities
+        .as_deref()
+        .map(<[_]>::to_vec)
+        .unwrap_or_default();
+    let proof = Proof::from_wire(authority, ceiling);
     if empty.response_code == ResponseCode::NXDomain {
-        Answer::NameNotFound { ttl }
+        Answer::NameNotFound { ttl, proof }
     } else {
-        Answer::NoRecordsOfType { ttl }
+        Answer::NoRecordsOfType { ttl, proof }
     }
 }
 
@@ -292,7 +317,7 @@ mod tests {
         // does not exist and stop trying IPv4 as well.
         assert!(matches!(
             negative(&empty_response(ResponseCode::NXDomain, Some(30))),
-            Answer::NameNotFound { ttl } if ttl == Duration::from_secs(30)
+            Answer::NameNotFound { ttl, .. } if ttl == Duration::from_secs(30)
         ));
         assert!(matches!(
             negative(&empty_response(ResponseCode::NoError, Some(30))),
@@ -306,12 +331,40 @@ mod tests {
     fn a_negative_answer_is_remembered_for_at_most_an_hour() {
         assert!(matches!(
             negative(&empty_response(ResponseCode::NXDomain, Some(86_400))),
-            Answer::NameNotFound { ttl } if ttl == Duration::from_secs(3600)
+            Answer::NameNotFound { ttl, .. } if ttl == Duration::from_secs(3600)
         ));
         assert!(matches!(
             negative(&empty_response(ResponseCode::NoError, Some(900))),
-            Answer::NoRecordsOfType { ttl } if ttl == Duration::from_secs(900)
+            Answer::NoRecordsOfType { ttl, .. } if ttl == Duration::from_secs(900)
         ));
+    }
+
+    /// Should change: the upstream's authority section is kept as the proof, with each TTL cut
+    /// to the same hour as the answer itself.
+    /// Should not change: no record of the proof is dropped or reordered.
+    #[test]
+    fn a_negative_answer_keeps_the_upstreams_proof() {
+        let zone = crate::dns::Proof::for_zone(&super::super::Name::parse("example.com"));
+        let mut authority = zone.as_wire().to_vec();
+        for record in &mut authority {
+            record.ttl = 86_400;
+        }
+        let mut empty = empty_response(ResponseCode::NXDomain, Some(86_400));
+        empty.authorities = Some(authority.into());
+
+        let Answer::NameNotFound { ttl, proof } = negative(&empty) else {
+            panic!("an NXDOMAIN is a name not found");
+        };
+        assert_eq!(ttl, Duration::from_secs(3600));
+        let kinds: Vec<_> = proof.as_wire().iter().map(|r| r.record_type()).collect();
+        assert_eq!(kinds, [WireRecordType::SOA, WireRecordType::RRSIG]);
+        assert!(proof.as_wire().iter().all(|record| record.ttl == 3600));
+    }
+
+    /// Should change: every query to an upstream asks for signatures (the DO bit).
+    #[test]
+    fn upstream_queries_ask_for_signatures() {
+        assert!(signatures_requested().flags().dnssec_ok);
     }
 
     /// Should change: an upstream that answers with a refusal or "not implemented" (as it does
@@ -344,7 +397,7 @@ mod tests {
     fn a_missing_negative_ttl_falls_back_to_the_default() {
         assert!(matches!(
             negative(&empty_response(ResponseCode::NXDomain, None)),
-            Answer::NameNotFound { ttl } if ttl == DEFAULT_NEGATIVE_TTL
+            Answer::NameNotFound { ttl, .. } if ttl == DEFAULT_NEGATIVE_TTL
         ));
     }
 

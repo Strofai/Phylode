@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::dns::{Query, Records};
+use crate::dns::{Proof, Query, Records};
 
 /// The longest a single answer may count as fresh, no matter how large the upstream TTL.
 /// The value is the same order of magnitude as hickory's `MAX_TTL`, which keeps one absurd
@@ -53,14 +53,16 @@ const MAX_ENTRY_MEMORY: usize = 32 * 1024;
 pub enum Cached {
     Records(Records),
     /// The upstream says this name does not exist. `ttl` is how long the device should
-    /// remember that.
+    /// remember that; `proof` is the upstream's evidence, for devices that validate signatures.
     NameNotFound {
         ttl: Duration,
+        proof: Proof,
     },
     /// The upstream says the name exists but has no records of that type. Apple devices ask
-    /// for AAAA on every IPv4-only domain, so this is the most common kind.
+    /// for AAAA on every IPv4-only domain, so this is the most common kind. `proof` as above.
     NoRecordsOfType {
         ttl: Duration,
+        proof: Proof,
     },
 }
 
@@ -73,20 +75,20 @@ impl Cached {
                 .min_ttl()
                 .unwrap_or(FRESH_FLOOR)
                 .clamp(FRESH_FLOOR, FRESH_CEILING),
-            Self::NameNotFound { ttl } | Self::NoRecordsOfType { ttl } => {
+            Self::NameNotFound { ttl, .. } | Self::NoRecordsOfType { ttl, .. } => {
                 (*ttl).clamp(FRESH_FLOOR, NEGATIVE_CEILING)
             }
         }
     }
 
-    /// Returns a copy whose TTL has the time spent in the cache subtracted, with a floor of
-    /// one second (same reasoning as [`Records::aged`]).
-    /// Roughly how much memory this answer takes once stored. Negative answers hold no
-    /// records and cost only their entry.
+    /// Roughly how much memory this answer takes once stored: its records, or for a negative
+    /// answer its proof, plus the entry itself.
     fn memory(&self) -> usize {
         let records = match self {
             Self::Records(records) => records.memory_estimate(),
-            Self::NameNotFound { .. } | Self::NoRecordsOfType { .. } => 0,
+            Self::NameNotFound { proof, .. } | Self::NoRecordsOfType { proof, .. } => {
+                proof.memory_estimate()
+            }
         };
         // The query is stored twice: as the map key and in the recency order.
         records
@@ -94,12 +96,20 @@ impl Cached {
             .saturating_add(2 * std::mem::size_of::<Query>())
     }
 
+    /// Returns a copy whose TTL has the time spent in the cache subtracted, with a floor of
+    /// one second (same reasoning as [`Records::aged`]).
     fn aged(&self, elapsed: Duration) -> Self {
         let left = |ttl: &Duration| ttl.saturating_sub(elapsed).max(FRESH_FLOOR);
         match self {
             Self::Records(records) => Self::Records(records.aged(elapsed)),
-            Self::NameNotFound { ttl } => Self::NameNotFound { ttl: left(ttl) },
-            Self::NoRecordsOfType { ttl } => Self::NoRecordsOfType { ttl: left(ttl) },
+            Self::NameNotFound { ttl, proof } => Self::NameNotFound {
+                ttl: left(ttl),
+                proof: proof.aged(elapsed),
+            },
+            Self::NoRecordsOfType { ttl, proof } => Self::NoRecordsOfType {
+                ttl: left(ttl),
+                proof: proof.aged(elapsed),
+            },
         }
     }
 }
@@ -314,6 +324,26 @@ mod tests {
 
     fn cache() -> Cache {
         Cache::new(3, Duration::from_secs(12 * 60 * 60))
+    }
+
+    /// Should change: a negative answer's proof counts against the memory bound.
+    /// Should not change: a negative answer without one costs only its entry, as before.
+    #[test]
+    fn a_negative_answers_proof_counts_against_memory() {
+        let ttl = Duration::from_secs(600);
+        let bare = Cached::NameNotFound {
+            ttl,
+            proof: Proof::default(),
+        };
+        let proven = Cached::NameNotFound {
+            ttl,
+            proof: Proof::for_zone(&Name::parse("example.com")),
+        };
+        assert_eq!(
+            bare.memory(),
+            std::mem::size_of::<Entry>() + 2 * std::mem::size_of::<Query>()
+        );
+        assert!(proven.memory() > bare.memory());
     }
 
     #[test]
@@ -568,18 +598,20 @@ mod tests {
             query("typo.example.com"),
             Cached::NameNotFound {
                 ttl: Duration::from_secs(300),
+                proof: crate::dns::Proof::default(),
             },
             now,
         );
         assert!(matches!(
             c.get_at(&query("typo.example.com"), now + Duration::from_secs(100)),
-            Hit::Fresh(Cached::NameNotFound { ttl }) if ttl == Duration::from_secs(200)
+            Hit::Fresh(Cached::NameNotFound { ttl, .. }) if ttl == Duration::from_secs(200)
         ));
 
         c.insert_at(
             query("ipv4only.example.com"),
             Cached::NoRecordsOfType {
                 ttl: Duration::from_secs(60),
+                proof: crate::dns::Proof::default(),
             },
             now,
         );
@@ -603,6 +635,7 @@ mod tests {
             q.clone(),
             Cached::NameNotFound {
                 ttl: Duration::from_secs(86_400),
+                proof: crate::dns::Proof::default(),
             },
             now,
         );

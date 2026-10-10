@@ -300,6 +300,7 @@ mod tests {
         Ok(Checked {
             answer: Answer::NameNotFound {
                 ttl: Duration::from_secs(60),
+                proof: crate::dns::Proof::default(),
             },
             signature: Signature::NotFlagged,
         })
