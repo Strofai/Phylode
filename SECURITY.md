@@ -58,6 +58,11 @@ Only the latest [release](https://github.com/Strofai/Phylode/releases) and the l
   the Mac is connected to itself are served, never one reached through a VPN; a Mac
   connected straight to a provider's network, as with a 100.64.0.0/10 address handed out by
   the provider, would also answer the provider's other customers on that network.
+- **Packets are read by hickory-dns.** Turning the bytes of a query or an upstream
+  response into names and records — bounds checks, name compression, matching a response
+  to its query — is done by the DNS library, which X41 D-Sec audited in 2024. Phylode
+  receives the packets itself, drops any the library can't read without replying to them,
+  and fuzzes both paths, but it doesn't parse them with code of its own.
 - **The blocklists are trusted as downloaded.** They come over HTTPS from HaGeZi's
   published mirrors and are checked for size, encoding and entry count, but not against a
   signature, since none is published. Someone who took over the source could block any
