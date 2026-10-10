@@ -8,8 +8,8 @@ name: Live checks
 on:
   push:
     paths: ["src/policy/ratelimit.rs", "tests/live_rate_limit.rs", ".github/workflows/live.yml"]
+  # Every pull request: main requires this check, and one skipped by a path filter never reports.
   pull_request:
-    paths: ["src/policy/ratelimit.rs", "tests/live_rate_limit.rs", ".github/workflows/live.yml"]
   workflow_dispatch:
 
 permissions:
