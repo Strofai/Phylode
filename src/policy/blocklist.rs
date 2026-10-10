@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use thiserror::Error;
@@ -33,6 +33,23 @@ pub enum BlocklistError {
 /// What breaks if you change it: it must equal `MAX_BYTES` in `deploy/update-blocklists.sh`
 /// (a test compares them), or the updater accepts a file the service then refuses.
 const MAX_LIST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Where the daily update sets aside a download with under half the entries of `list`, the
+/// list in use. The file exists only while such a download is waiting; the next update that
+/// is used removes it.
+///
+/// What breaks if you change it: `deploy/update-blocklists.sh` writes `$name.held.txt`
+/// beside `$name.txt`; change one without the other and a held download goes unreported.
+pub fn held_path(list: &Path) -> PathBuf {
+    list.with_extension("held.txt")
+}
+
+/// How many entries the download held back for `list` has, counted as the updater counts
+/// them (every line not starting with `#`); `None` when nothing is held or it can't be read.
+pub fn held_entries(list: &Path) -> Option<usize> {
+    let text = read_list(&held_path(list)).ok()?;
+    Some(text.lines().filter(|line| !line.starts_with('#')).count())
+}
 
 /// Reads one list file, refusing anything over [`MAX_LIST_BYTES`] without reading the rest.
 fn read_list(path: &Path) -> Result<String, BlocklistError> {

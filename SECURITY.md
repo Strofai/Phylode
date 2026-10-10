@@ -65,5 +65,7 @@ Only the latest [release](https://github.com/Strofai/Phylode/releases) and the l
   and fuzzes both paths, but it doesn't parse them with code of its own.
 - **The blocklists are trusted as downloaded.** They come over HTTPS from HaGeZi's
   published mirrors and are checked for size, encoding and entry count, but not against a
-  signature, since none is published. Someone who took over the source could block any
-  domain except Apple's hard-coded hosts; a list can only block, never redirect.
+  signature, since none is published. A download with under half the entries of the list
+  in use is set aside rather than used. Someone who took over the source could still block
+  any domain except Apple's hard-coded hosts, or remove entries a little at a time; a list
+  can only block, never redirect.

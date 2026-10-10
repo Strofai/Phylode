@@ -23,8 +23,10 @@ the combination HaGeZi recommends:
 
 Together they cover about one million domains once duplicates are removed. Your Mac
 downloads both every day at 04:17 and switches to a new copy only after checking that it's
-complete, keeping the previous one. The lists aren't part of this repository; HaGeZi
-publishes them under GPL-3.0.
+complete, keeping the previous one. A new copy with under half the entries of the one in
+use is set aside instead, in case the source was emptied or tampered with; the weekly
+summary notes it and `phylode status` explains how to use it. The lists aren't part of
+this repository; HaGeZi publishes them under GPL-3.0.
 
 To block less or more, change `protection` in `/usr/local/etc/phylode.conf`, then run
 `sudo phylode install` again:
@@ -202,7 +204,7 @@ browsing history of everyone on your network, and your settings.
 
 The current version is 1.0.0; `main` is tested on every change and may be ahead of it.
 It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in `Cargo.lock`)
-and 287 tests. Four entry points — packets from devices, packets from upstream servers,
+and 288 tests. Four entry points — packets from devices, packets from upstream servers,
 the blocklist parser and the configuration parser — are fuzzed by a GitHub Actions
 workflow.
 

@@ -23,7 +23,9 @@ use phylode::health;
 use phylode::install;
 use phylode::journal::{self, EventKind, Journal, LocalZone, OlderDetail};
 use phylode::log_line;
-use phylode::policy::{Allowlist, AttachedNetworks, Blocklist, RebindGuard, ServedNetworks};
+use phylode::policy::{
+    Allowlist, AttachedNetworks, Blocklist, RebindGuard, ServedNetworks, held_entries, held_path,
+};
 use phylode::report;
 use phylode::upstream::{self, Conductor};
 
@@ -340,6 +342,16 @@ fn status(config_path: &Path) -> ExitCode {
             age_mark(path),
             unusable_mark(path)
         );
+        if let Some(entries) = held_entries(path) {
+            println!(
+                "    Warning: the last update had only {}, under half of this list, so it was set \
+                 aside and this list is still in use. If the list really did shrink, use the \
+                 update with: sudo mv {} {}",
+                plural(entries, "entry", "entries"),
+                held_path(path).display(),
+                path.display()
+            );
+        }
     }
     // Load them the way the service does, so the number matches what the service sees.
     let blocklist = Blocklist::new();
@@ -880,7 +892,18 @@ fn spawn_reloader(
     tokio::spawn(async move {
         let mut lists_seen = None;
         let mut allow_seen = None;
+        let mut held_seen = None;
         loop {
+            let held_paths: Vec<PathBuf> = config
+                .blocklists()
+                .iter()
+                .map(|list| held_path(list))
+                .collect();
+            let held = fingerprint(held_paths.iter().map(PathBuf::as_path));
+            if held_seen.as_ref() != Some(&held) {
+                held_seen = Some(held);
+                report_held(&config, journal.as_ref());
+            }
             let lists = fingerprint(
                 config
                     .blocklists()
@@ -902,6 +925,22 @@ fn spawn_reloader(
             tokio::time::sleep(RELOAD_INTERVAL).await;
         }
     });
+}
+
+/// Journals each list whose daily update is being held back, so the weekly summary shows it.
+/// Runs at start-up and whenever a held download appears, changes or goes.
+fn report_held(config: &Config, journal: Option<&Journal>) {
+    for list in config.blocklists() {
+        let Some(entries) = held_entries(list) else {
+            continue;
+        };
+        let name = list.file_name().unwrap_or_default().to_string_lossy();
+        let detail = format!("{name}: update has {}", plural(entries, "entry", "entries"));
+        log_line!("Blocklist update set aside, under half the list in use: {detail}");
+        if let Some(journal) = journal {
+            journal.event(EventKind::BlocklistHeld, detail);
+        }
+    }
 }
 
 async fn reload_blocklist(blocklist: &Blocklist, config: &Config, journal: Option<&Journal>) {

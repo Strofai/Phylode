@@ -14,7 +14,7 @@ pub mod rebinding;
 
 pub use allowlist::{Allowlist, AllowlistError};
 pub use attached::AttachedNetworks;
-pub use blocklist::{Blocklist, BlocklistError, Verdict};
+pub use blocklist::{Blocklist, BlocklistError, Verdict, held_entries, held_path};
 pub use clients::ServedNetworks;
 pub use ratelimit::{Admit, RateLimit};
 pub use rebinding::{RebindGuard, Rebinding};

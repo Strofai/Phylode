@@ -114,9 +114,24 @@ for entry in "${LISTS[@]}"; do
   fi
   actual="$(grep -vc '^#' "$tmp" || true)"
 
+  # Under half the entries of the list in use means the source may have been emptied or
+  # tampered with, not a day's ordinary change. The download is set aside as $name.held.txt,
+  # which the service reports and `phylode status` explains how to use; the next update that
+  # passes removes it.
+  # What breaks if you change it: the name must match `held_path` in src/policy/blocklist.rs.
+  held="$DIR/$name.held.txt"
   if [[ -f "$target" ]]; then
+    in_use="$(grep -vc '^#' "$target" || true)"
+    if (( actual * 2 < in_use )); then
+      chmod 644 "$tmp"
+      mv "$tmp" "$held"
+      echo "$(date '+%F %T') ${name}: the update has $actual entries, under half of the $in_use in use; keeping the list in use" >&2
+      status=1
+      continue
+    fi
     cp -p "$target" "$DIR/$name.prev.txt"
   fi
+  rm -f "$held"
   chmod 644 "$tmp"
   mv "$tmp" "$target"
   echo "$(date '+%F %T') ${name}: updated, $actual entries"

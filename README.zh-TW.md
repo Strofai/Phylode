@@ -20,7 +20,9 @@ Phylode 使用 [HaGeZi](https://github.com/hagezi/dns-blocklists) 維護的兩�
   網路釣魚、詐騙和挖礦程式的網域。
 
 兩份合併、去除重複後約涵蓋 100 萬個網域。你的 Mac 每天 04:17 會下載這兩份名單，確認新版完整之後
-才換上，並保留上一版。名單不在這個 repo 裡；HaGeZi 以 GPL-3.0 授權發布。
+才換上，並保留上一版。新版的網域數不到目前使用中那份的一半時，會先擱著不用，以防來源被清空或竄改；
+每週摘要會記下這件事，`phylode status` 會說明要怎麼改用它。名單不在這個 repo 裡；HaGeZi 以 GPL-3.0
+授權發布。
 
 想擋少一點或多一點，在 `/usr/local/etc/phylode.conf` 改 `protection`，再執行一次
 `sudo phylode install`：
@@ -168,7 +170,7 @@ sudo ./target/release/phylode install
 ## 開發狀態
 
 目前的版本是 1.0.0；`main` 每次改動都經過測試，可能比它新。程式約
-12,000 行 Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 287 則。四個入口——裝置送來的封包、上游
+12,000 行 Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 288 則。四個入口——裝置送來的封包、上游
 回來的封包、封鎖名單的解析、設定檔的解析——由 GitHub Actions 工作流程進行模糊測試。
 
 接下來：用 Homebrew 安裝，不必先裝 Rust 工具鏈。

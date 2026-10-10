@@ -110,6 +110,9 @@ pub enum EventKind {
     /// A blocklist update could not be used, so the list loaded before stays in use and
     /// blocking continues. Repeated occurrences mean the daily update keeps failing.
     BlocklistKept,
+    /// The daily update downloaded a list with under half the entries of the one in use and
+    /// set it aside, so the one in use keeps blocking. `detail` names the list and the count.
+    BlocklistHeld,
     /// The allowlist could not be read (a missing file does not count) — domains the user
     /// allowed may be blocked again during this window.
     AllowlistFailed,
@@ -135,12 +138,13 @@ pub enum EventKind {
 /// Every event kind. A new kind must be added here or the weekly summary will not
 /// recognize it. Used by [`EventKind::from_wire`], which has a test guarding against
 /// omissions.
-const ALL_EVENT_KINDS: [EventKind; 12] = [
+const ALL_EVENT_KINDS: [EventKind; 13] = [
     EventKind::Started,
     EventKind::Stopped,
     EventKind::BlocklistLoaded,
     EventKind::BlocklistFailed,
     EventKind::BlocklistKept,
+    EventKind::BlocklistHeld,
     EventKind::AllowlistFailed,
     EventKind::UpstreamsDown,
     EventKind::UpstreamsRecovered,
@@ -160,6 +164,7 @@ impl EventKind {
             Self::BlocklistLoaded => "blocklist-loaded",
             Self::BlocklistFailed => "blocklist-failed",
             Self::BlocklistKept => "blocklist-kept",
+            Self::BlocklistHeld => "blocklist-held",
             Self::AllowlistFailed => "allowlist-failed",
             Self::UpstreamsDown => "upstreams-down",
             Self::UpstreamsRecovered => "upstreams-recovered",
@@ -190,6 +195,11 @@ impl EventKind {
             }
             Self::BlocklistKept => {
                 "a blocklist could not be used; blocking continued with the lists already loaded"
+            }
+            Self::BlocklistHeld => {
+                "a blocklist update had under half the entries of the list in use, so it was set \
+                 aside and blocking continued with the list in use; phylode status says how to \
+                 use it anyway"
             }
             Self::AllowlistFailed => {
                 "allowlist could not be read; domains you allowed may have been blocked again \
@@ -226,6 +236,8 @@ impl EventKind {
             | Self::BlocklistLoaded
             // The previous list kept blocking; only the update was lost.
             | Self::BlocklistKept
+            // The list in use keeps blocking; only the update waits.
+            | Self::BlocklistHeld
             | Self::UpstreamsRecovered
             | Self::RecordsDropped
             // This blocks more than usual, not less; protection is not interrupted.
