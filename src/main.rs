@@ -395,6 +395,17 @@ fn status(config_path: &Path) -> ExitCode {
             domains.join(", ")
         ),
     }
+    if !config.nat64_prefixes().is_empty() {
+        let prefixes: Vec<String> = config
+            .nat64_prefixes()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        println!(
+            "NAT64 prefixes the rebinding defense also reads: 64:ff9b::/96, {}",
+            prefixes.join(", ")
+        );
+    }
     ExitCode::SUCCESS
 }
 
@@ -742,6 +753,7 @@ async fn run(config: Config) -> Result<(), String> {
     }
     let rebind_guard = RebindGuard::with_internal_domains(config.internal_domains())
         .counting_as_inside(config.served_networks())
+        .reading_nat64(config.nat64_prefixes())
         .attached_to(attached.clone());
     let gatekeeper = Arc::new(
         Gatekeeper::new(

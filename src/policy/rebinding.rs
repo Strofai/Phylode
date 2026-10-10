@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use super::AttachedNetworks;
-use crate::config::IpNetwork;
+use crate::config::{IpNetwork, Nat64Prefix};
 
 /// Whether this set of answers may be handed to the device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,6 +40,8 @@ pub struct RebindGuard {
     internal_domains: HashSet<String>,
     /// `serve_network` blocks: the operator has said these addresses are theirs.
     configured: Vec<IpNetwork>,
+    /// `nat64_prefix` lines: the network's own NAT64 prefixes, read like `64:ff9b::/96`.
+    nat64: Vec<Nat64Prefix>,
     /// The networks this Mac is on. Providers change the IPv6 prefix without notice, so this
     /// is read from macOS rather than configured.
     attached: AttachedNetworks,
@@ -75,6 +77,16 @@ impl RebindGuard {
         self
     }
 
+    /// Also reads the IPv4 address inside these NAT64 prefixes. A device behind the network's
+    /// translator reaches that IPv4 address, so it is judged as one.
+    ///
+    /// What breaks if you change it: without this, a domain can point a device on an
+    /// IPv6-only network at `192.168.1.1` by writing it inside the network's own prefix.
+    pub fn reading_nat64(mut self, prefixes: &[Nat64Prefix]) -> Self {
+        self.nat64 = prefixes.to_vec();
+        self
+    }
+
     /// Also counts the networks this Mac is on as inside. `attached` is shared with whatever
     /// keeps it current, so a new prefix from the provider takes effect here too.
     pub fn attached_to(mut self, attached: AttachedNetworks) -> Self {
@@ -99,10 +111,11 @@ impl RebindGuard {
             IpAddr::V6(v6) => v6
                 .to_ipv4_mapped()
                 .or_else(|| nat64_embedded(v6))
+                .or_else(|| self.nat64.iter().find_map(|prefix| prefix.embedded(v6)))
                 .map_or(*address, IpAddr::V4),
             v4 => *v4,
         };
-        is_internal(address)
+        is_internal(&unwrapped)
             || self.configured.iter().any(|net| net.contains(unwrapped))
             || self.attached.contains(unwrapped)
     }
@@ -325,6 +338,38 @@ mod tests {
         }
         assert_eq!(
             guard.inspect("nas.example.net", &[ip("2001:db8:1:2::1")]),
+            Rebinding::Clean
+        );
+    }
+
+    /// Should change: with the network's NAT64 prefix configured, an address inside it is
+    /// judged by the IPv4 address it reaches (RFC 6052 §2.2, /48 layout), served networks
+    /// included.
+    /// Should not change: without the setting such an address is plain IPv6 and passes, and a
+    /// public IPv4 address behind the prefix passes either way.
+    #[test]
+    fn a_configured_nat64_prefix_is_read_like_the_well_known_one() {
+        let into_router = ip("64:ff9b:1:c0a8:1:100::"); // 192.168.1.1
+        let into_served = ip("64:ff9b:1:c633:64:700::"); // 198.51.100.7
+        let public = ip("64:ff9b:1:101:1:100::"); // 1.1.1.1
+        let unconfigured = RebindGuard::new();
+        assert_eq!(
+            unconfigured.inspect("evil.example.com", &[into_router]),
+            Rebinding::Clean
+        );
+
+        let guard = RebindGuard::new()
+            .counting_as_inside(&[net("198.51.100.0/24")])
+            .reading_nat64(&["64:ff9b:1::/48".parse().unwrap()]);
+        for inside in [into_router, into_served] {
+            assert_eq!(
+                guard.inspect("evil.example.com", &[inside]),
+                Rebinding::Blocked,
+                "{inside}"
+            );
+        }
+        assert_eq!(
+            guard.inspect("www.example.com", &[public]),
             Rebinding::Clean
         );
     }

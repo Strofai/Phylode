@@ -188,7 +188,10 @@ browsing history of everyone on your network, and your settings.
   ranges, any `serve_network`, and every network your Mac is connected to, as Apple defines
   a local network. If a name of your own points at a device at home, such as a
   remote-access name for a NAS, the weekly summary lists it; add an `internal_domain`
-  line for it to `/usr/local/etc/phylode.conf`.
+  line for it to `/usr/local/etc/phylode.conf`. On an IPv6-only network that reaches IPv4
+  through NAT64, Phylode recognises the standard prefix `64:ff9b::/96` by itself; if your
+  network uses another, add it as a `nat64_prefix` line, such as
+  `nat64_prefix = 64:ff9b:1::/48`, and run `sudo phylode install` again.
 - **It looks after itself.** Every 10 seconds, Phylode checks that it's still answering
   and restarts if it isn't. An upstream server that stops responding is tried again and
   returns when it recovers.
@@ -199,7 +202,7 @@ browsing history of everyone on your network, and your settings.
 
 The current version is 1.0.0; `main` is tested on every change and may be ahead of it.
 It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in `Cargo.lock`)
-and 284 tests. Four entry points — packets from devices, packets from upstream servers,
+and 287 tests. Four entry points — packets from devices, packets from upstream servers,
 the blocklist parser and the configuration parser — are fuzzed by a GitHub Actions
 workflow.
 

@@ -7,7 +7,7 @@
 //! What breaks if you change it: that judgement rests on the file being written only by the
 //! service and its owner — do not make this read from the network.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -281,6 +281,56 @@ impl std::str::FromStr for IpNetwork {
     }
 }
 
+/// The IPv6 prefix a network's NAT64 translator uses to reach IPv4 addresses, from a
+/// `nat64_prefix` line. Holding one means it is IPv6 and one of the six lengths RFC 6052
+/// §2.2 defines: 32, 40, 48, 56, 64 or 96.
+///
+/// What breaks if you change it: the length decides where the IPv4 address sits, so a
+/// prefix written with the wrong length reads every address in it as a different IPv4
+/// address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Nat64Prefix(IpNetwork);
+
+impl Nat64Prefix {
+    /// The IPv4 address `address` reaches through this translator, or `None` when `address`
+    /// is outside the prefix.
+    ///
+    /// The address takes the four octets after the prefix, skipping octet 8, which RFC 6052
+    /// reserves and which never carries any of it.
+    pub fn embedded(&self, address: &Ipv6Addr) -> Option<Ipv4Addr> {
+        if !self.0.contains(IpAddr::V6(*address)) {
+            return None;
+        }
+        let octets = address.octets();
+        let mut embedded = (usize::from(self.0.prefix) / 8..)
+            .filter(|&index| index != 8)
+            .map(|index| octets[index]);
+        Some(Ipv4Addr::new(
+            embedded.next()?,
+            embedded.next()?,
+            embedded.next()?,
+            embedded.next()?,
+        ))
+    }
+}
+
+impl std::fmt::Display for Nat64Prefix {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::str::FromStr for Nat64Prefix {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, ()> {
+        let network: IpNetwork = text.parse()?;
+        (network.address.is_ipv6() && [32, 40, 48, 56, 64, 96].contains(&network.prefix))
+            .then_some(Self(network))
+            .ok_or(())
+    }
+}
+
 /// The service's full configuration. The fields are private, so holding a `Config` means it
 /// passed validation.
 #[derive(Clone, Debug)]
@@ -297,6 +347,7 @@ pub struct Config {
     stale_max_age: Duration,
     internal_domains: Vec<String>,
     served_networks: Vec<IpNetwork>,
+    nat64_prefixes: Vec<Nat64Prefix>,
     protection: Protection,
     journal: JournalDetail,
 }
@@ -370,6 +421,12 @@ impl Config {
         &self.served_networks
     }
 
+    /// NAT64 prefixes besides the well-known `64:ff9b::/96`, from `nat64_prefix` lines. The
+    /// rebinding defence reads the IPv4 address inside any address in them.
+    pub fn nat64_prefixes(&self) -> &[Nat64Prefix] {
+        &self.nat64_prefixes
+    }
+
     /// Reads and validates the file at `path`. The error does not repeat the path; callers
     /// name the file when they report it.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
@@ -390,6 +447,7 @@ impl Config {
         let mut stale_max_age = DEFAULT_STALE_MAX_AGE;
         let mut internal_domains = Vec::new();
         let mut served_networks = Vec::new();
+        let mut nat64_prefixes = Vec::new();
         let mut protection = Protection::default();
         let mut journal = JournalDetail::default();
 
@@ -455,6 +513,7 @@ impl Config {
                     }
                     served_networks.push(network);
                 }
+                "nat64_prefix" => nat64_prefixes.push(value.parse().map_err(|()| bad())?),
                 "protection" => protection = Protection::parse(value).ok_or_else(bad)?,
                 "journal" => journal = JournalDetail::parse(value).ok_or_else(bad)?,
                 _ => {
@@ -489,6 +548,7 @@ impl Config {
             stale_max_age,
             internal_domains,
             served_networks,
+            nat64_prefixes,
             protection,
             journal,
         })
@@ -708,6 +768,50 @@ mod tests {
             assert!(message.contains("line "), "{message}");
             assert!(!message.contains(written), "{message}");
         }
+    }
+
+    /// Should change: each prefix length finds the IPv4 address where RFC 6052 puts it. The
+    /// cases are the RFC's own Table 1, which embeds 192.0.2.33 under each length.
+    #[test]
+    fn a_nat64_prefix_finds_the_ipv4_address_at_each_length() {
+        for (prefix, address) in [
+            ("2001:db8::/32", "2001:db8:c000:221::"),
+            ("2001:db8:100::/40", "2001:db8:1c0:2:21::"),
+            ("2001:db8:122::/48", "2001:db8:122:c000:2:2100::"),
+            ("2001:db8:122:300::/56", "2001:db8:122:3c0:0:221::"),
+            ("2001:db8:122:344::/64", "2001:db8:122:344:c0:2:2100::"),
+            ("2001:db8:122:344::/96", "2001:db8:122:344::192.0.2.33"),
+        ] {
+            let prefix: Nat64Prefix = prefix.parse().unwrap();
+            assert_eq!(
+                prefix.embedded(&address.parse().unwrap()),
+                Some(Ipv4Addr::new(192, 0, 2, 33)),
+                "{prefix}"
+            );
+        }
+        let prefix: Nat64Prefix = "2001:db8:122::/48".parse().unwrap();
+        assert_eq!(prefix.embedded(&"2001:db8:123::1".parse().unwrap()), None);
+    }
+
+    /// Should change: only an IPv6 prefix of a length RFC 6052 defines is accepted, since any
+    /// other length leaves no fixed place for the IPv4 address.
+    /// Should not change: the RFC 8215 local-use prefix is accepted, and repeats add up.
+    #[test]
+    fn only_rfc_6052_nat64_prefixes_are_accepted() {
+        for bad in ["64:ff9b:1::/50", "192.0.2.0/24", "64:ff9b:1::", "nat64"] {
+            let error = Config::parse(&format!("{MINIMAL}\nnat64_prefix = {bad}"))
+                .expect_err("not a NAT64 prefix");
+            assert!(
+                matches!(error, ConfigError::BadValue { line: 5, .. }),
+                "{error:?}"
+            );
+        }
+        let config = Config::parse(&format!(
+            "{MINIMAL}\nnat64_prefix = 64:ff9b:1::/48\nnat64_prefix = 2001:db8:64::/96"
+        ))
+        .unwrap();
+        assert_eq!(config.nat64_prefixes().len(), 2);
+        assert!(Config::parse(MINIMAL).unwrap().nat64_prefixes().is_empty());
     }
 
     #[test]

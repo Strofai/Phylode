@@ -158,7 +158,9 @@ sudo ./target/release/phylode install
   名稱絕不會送出去，藏在無害別名後面的追蹤器（CNAME 偽裝，或指向別處的 HTTPS 記錄）也會被封鎖。
   「你的網路」指私人位址範圍、`serve_network` 寫的網段，以及你的 Mac 接著的每個網段，跟 Apple
   對區域網路的定義相同。如果你自己的網域名稱指向家裡的裝置（例如 NAS 的遠端連線名稱），每週摘要
-  會列出它；在 `/usr/local/etc/phylode.conf` 加一行 `internal_domain` 即可。
+  會列出它；在 `/usr/local/etc/phylode.conf` 加一行 `internal_domain` 即可。只有 IPv6、透過 NAT64
+  連 IPv4 的網路，Phylode 會自己認得標準前綴 `64:ff9b::/96`；如果你的網路用的是別的前綴，加一行
+  `nat64_prefix`（例如 `nat64_prefix = 64:ff9b:1::/48`），再執行一次 `sudo phylode install`。
 - **自行維持運作。** Phylode 每 10 秒確認一次自己仍在回應，沒有回應就重新啟動。停止回應的上游
   伺服器會再次嘗試，恢復後自動重新使用。
 - **以最少的權限執行。** Phylode 以自己專屬的帳號執行，不是 root；53 埠由 macOS 開啟後再交給它。
@@ -166,7 +168,7 @@ sudo ./target/release/phylode install
 ## 開發狀態
 
 目前的版本是 1.0.0；`main` 每次改動都經過測試，可能比它新。程式約
-12,000 行 Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 284 則。四個入口——裝置送來的封包、上游
+12,000 行 Rust，直接依賴 11 個套件（`Cargo.lock` 共 181 個），測試 287 則。四個入口——裝置送來的封包、上游
 回來的封包、封鎖名單的解析、設定檔的解析——由 GitHub Actions 工作流程進行模糊測試。
 
 接下來：用 Homebrew 安裝，不必先裝 Rust 工具鏈。
