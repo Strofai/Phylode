@@ -122,10 +122,15 @@ phylode block example.com
 要更新時，在當初安裝的資料夾裡執行：
 
 ```bash
+git switch main
 git pull
 cargo build --release
 sudo ./target/release/phylode install
 ```
+
+如果你是用 `git checkout v…` 裝某個發布版本，資料夾會不在任何分支上，只打 `git pull` 會停在
+「You are not currently on a branch」，所以要先 `git switch main`。想一直停在發布版本，就改成
+`git fetch --tags`，再 `git checkout` 新版本的標籤。
 
 `install` 會直接換掉正在執行的版本，中間不會中斷：Phylode 全程照常回應，你的設定、名單和查詢記錄都不變。
 `phylode --version` 會顯示目前安裝的版本。

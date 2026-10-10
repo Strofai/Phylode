@@ -139,10 +139,15 @@ this page. Phylode never checks for updates itself, so nothing about your networ
 To update, in the folder you installed from:
 
 ```bash
+git switch main
 git pull
 cargo build --release
 sudo ./target/release/phylode install
 ```
+
+`git switch main` matters if you installed a release with `git checkout v…`: that leaves the
+folder on no branch, and `git pull` alone stops with "You are not currently on a branch". To
+stay on releases instead, run `git fetch --tags` and `git checkout` the new version's tag.
 
 `install` replaces the running copy without a gap: Phylode keeps answering throughout, and
 your settings, lists and query journal stay as they are. `phylode --version` shows which
