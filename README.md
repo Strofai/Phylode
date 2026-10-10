@@ -197,14 +197,13 @@ browsing history of everyone on your network, and your settings.
 
 ## Project status
 
-Phylode works and runs every day. The current version is 1.0.0; `main` is tested on every
-change and may be ahead of it. It's about 12,000 lines of Rust with 11 direct dependencies
-(181 packages in `Cargo.lock`) and 284 tests. Four entry points — packets from devices, packets from
-upstream servers, the blocklist parser and the configuration parser — are fuzzed by a
-GitHub Actions workflow.
+The current version is 1.0.0; `main` is tested on every change and may be ahead of it.
+It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in `Cargo.lock`)
+and 284 tests. Four entry points — packets from devices, packets from upstream servers,
+the blocklist parser and the configuration parser — are fuzzed by a GitHub Actions
+workflow.
 
-Coming next: Phylode's own validation of incoming packets (today the DNS library does
-it), a macOS sandbox profile, and a choice of how strict the lists are.
+Coming next: installing with Homebrew, without the Rust toolchain.
 
 Not planned for now: routing all traffic through the Mac, protection away from your
 network, a graphical interface, and telemetry of any kind.

@@ -14,7 +14,8 @@ fixes land on `main`, and the advisory is published once a fix is available.
 
 ## Supported versions
 
-There are no releases yet. Only the latest `main` is supported.
+Only the latest [release](https://github.com/Strofai/Phylode/releases) and the latest
+`main` are supported. Fixes land on `main` first and ship in the next release.
 
 ## In scope
 
