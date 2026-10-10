@@ -50,19 +50,49 @@ jobs:
           printf 'ads.example.test\n' > "$dir/list.txt"
           # The aliases sit on loopback, not on a wired or Wi-Fi network, so Phylode serves them
           # only when the configuration names them, as an owner would for any other network.
-          printf 'listen = 0.0.0.0:15353\nupstream = tls 1.1.1.1 cloudflare-dns.com\nblocklist = %s/list.txt\njournal_dir = %s/journal\nserve_network = 10.99.0.0/16\n' \
-            "$dir" "$dir" > "$dir/phylode.conf"
+          printf 'listen = 0.0.0.0:15353\nupstream = tls 1.1.1.1 cloudflare-dns.com\nblocklist = %s/list.txt\nblocklist = %s/lists/hagezi-main.txt\nblocklist = %s/lists/hagezi-tif.txt\njournal_dir = %s/journal\nserve_network = 10.99.0.0/16\n' \
+            "$dir" "$dir" "$dir" "$dir" > "$dir/phylode.conf"
           echo "LIVE_DIR=$dir" >> "$GITHUB_ENV"
 
+      # The lists take most of Phylode's memory, so the strictest tier is loaded, as on a real
+      # network.
+      - name: Download the strictest lists
+        run: |
+          printf 'protection = strict\n' > "$LIVE_DIR/update.conf"
+          bash deploy/update-blocklists.sh "$LIVE_DIR/lists" "$LIVE_DIR/update.conf"
+
+      # One step, so the service and the memory sampler run throughout. The list reload at the
+      # end holds the old and the new copy at once, which is when memory peaks.
       - name: A device over its limit stays limited while new sources fill the table
         run: |
           ./target/release/phylode --config "$LIVE_DIR/phylode.conf" > "$LIVE_DIR/serve.log" 2>&1 &
           pid=$!
-          sleep 3
+          ( peak=0
+            while rss=$(ps -o rss= -p "$pid"); do
+              if (( rss > peak )); then peak=$rss; echo "$peak" > "$LIVE_DIR/peak-kb"; fi
+              sleep 0.2
+            done ) &
+          for _ in $(seq 120); do grep -q "Blocklist loaded" "$LIVE_DIR/serve.log" && break; sleep 0.5; done
           status=0
           cargo test --release --test live_rate_limit -- --ignored --nocapture || status=$?
+          touch "$LIVE_DIR"/lists/hagezi-*.txt
+          for _ in $(seq 120); do [[ $(grep -c "Blocklist loaded" "$LIVE_DIR/serve.log") -ge 2 ]] && break; sleep 0.5; done
+          sleep 2
           kill "$pid"
+          wait "$pid" || true
+          sleep 1
           exit "$status"
+
+      # MAX_MB is about one and a half times the peak measured when it was set; the README quotes
+      # the measurement. What breaks if you change it: raising it to pass hides memory growth.
+      - name: Peak memory stays under the ceiling
+        env:
+          MAX_MB: 200
+        run: |
+          grep "Blocklist loaded" "$LIVE_DIR/serve.log"
+          peak_mb=$(( $(cat "$LIVE_DIR/peak-kb") / 1024 ))
+          echo "Peak resident memory: ${peak_mb} MB (ceiling ${MAX_MB} MB)"
+          (( peak_mb <= MAX_MB ))
 
       - name: Service logs
         if: always()
