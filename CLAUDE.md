@@ -96,6 +96,10 @@ like a product's release history, not a work log.
   belong together; one substantial fix can stand alone. Coherence decides, not a count —
   never pad a commit to reach a number. Keep unrelated areas apart: a security fix and a
   README rewording do not share a commit.
+- **Follow-ups belong to the change that caused them.** A number in the README that a
+  change moved (test count, dependency count) goes in that change's commit, not a separate
+  one. A breakage found before pushing is fixed inside the commit that introduced it; only
+  a breakage found after it reached `main` gets its own `Fix:` commit.
 - **What reaches `main` is finished.** Every commit pushed to `main` builds and passes the
   checks relevant to it: code or dependency changes need fmt, clippy, the tests and, when
   `Cargo.toml` or `Cargo.lock` changed, `cargo deny`; documentation-only changes need none of
@@ -105,9 +109,22 @@ like a product's release history, not a work log.
   or to anything `install.yml` exercises (`src/install/`, `deploy/`), cannot be verified
   locally: push it to a branch, run the workflow there (`install.yml` has a manual trigger),
   and bring it to `main` only once it passes. A step that has never run is not finished.
-- **Summary line:** imperative, at most 72 characters, saying what changes for the person
-  using it rather than which files moved: `Keep the journal within its retention on a Mac
-  that sleeps at night`, not `Update writer.rs`. No type prefixes, no trailing full stop.
+- **Summary line:** one of five type prefixes, then an imperative sentence; at most 72
+  characters in total, no trailing full stop. The sentence says what changes for the person
+  using it rather than which files moved: `Fix: Keep the journal within its retention on a
+  Mac that sleeps at night`, not `Fix: Update writer.rs`. The prefixes are capitalised and
+  there are exactly five; no others, no scope in parentheses:
+  - `Feat:` something the program can do that it could not before
+  - `Fix:` behaviour that was wrong, including security fixes
+  - `Docs:` documentation only (README, SECURITY.md, CONTRIBUTING.md, `docs/`)
+  - `Test:` tests only, no change to what the program does
+  - `Chore:` everything else that does not change behaviour: CI workflows, dependencies,
+    tooling
+- **One trailer, nothing else:** when an AI wrote the change with you, end with
+  `Co-Authored-By: Claude <model name> <noreply@anthropic.com>` (for example
+  `Claude Opus 5.5`). Never add session links (`Claude-Session:`, `claude.ai/code/…`),
+  "Generated with" lines or any other trailer a tool offers — the history is public and
+  cannot be cleaned without recreating the repository.
 - **Body** (wrapped at 72): why the change was needed, what changed, and what is now true —
   motivation, modifications, result. For a batch, one short paragraph or bullet per fix.
 - **Security fixes** state the impact in one line ("A standard account could replace the
