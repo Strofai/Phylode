@@ -125,11 +125,27 @@ like a product's release history, not a work log.
   `Claude Opus 5.5`). Never add session links (`Claude-Session:`, `claude.ai/code/…`),
   "Generated with" lines or any other trailer a tool offers — the history is public and
   cannot be cleaned without recreating the repository.
-- **Body** (wrapped at 72): why the change was needed, what changed, and what is now true —
-  motivation, modifications, result. For a batch, one short paragraph or bullet per fix.
-- **Security fixes** state the impact in one line ("A standard account could replace the
-  installed binary"), then how it was addressed ("Install now refuses folders that account
-  can write"). No exploit detail.
+- **Body** (wrapped at 72) reads like release notes, in two parts:
+  1. One sentence on what changes for the person using Phylode. A fix that closes a security
+     or safety gap starts it with `Impact:` and says what could happen before ("Impact: A
+     standard account could replace the installed binary"), with no exploit detail.
+  2. A blank line, then one line per change, each starting with `Added`, `Fixed`,
+     `Changed`, `Corrected` or `Removed`.
+
+  A correction states what is true, not a reply to an earlier commit: "Corrected the
+  README: hickory-dns reads incoming packets, not Phylode's own code", not "The previous
+  commit was wrong".
+
+  ```
+  Fix: Guard against rebinding through a network's own NAT64 prefix
+
+  Impact: On an IPv6-only network with its own NAT64 prefix, a domain
+  could point devices at addresses inside the network.
+
+  - Added nat64_prefix for networks that use their own NAT64 prefix
+  - Fixed rebinding protection missing addresses inside that prefix
+  - Changed phylode status to list the prefixes in use
+  ```
 - In English, like the rest of the repository: the people reading `git log` are
   contributors.
 

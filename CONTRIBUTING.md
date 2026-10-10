@@ -14,9 +14,11 @@ network online wins over blocking more, and Apple's own services always pass.
 - One commit per coherent change. The summary line starts with one of `Feat:`, `Fix:`,
   `Docs:`, `Test:` or `Chore:`, then says in the imperative, within 72 characters, what
   changes for someone using Phylode — `Fix: Keep the journal within its retention on a Mac
-  that sleeps at night`, not `Fix: Update writer.rs` — and the body says why it was needed,
-  what changed and what is now true. Plain English, the way release notes read; the full
-  rules are under "Commits and pushes" in [CLAUDE.md](CLAUDE.md).
+  that sleeps at night`, not `Fix: Update writer.rs`. The body reads like release notes: one
+  sentence on what changes for someone using Phylode (`Impact:` first for a security fix),
+  then one line per change starting with `Added`, `Fixed`, `Changed`, `Corrected` or
+  `Removed`. The full rules and an example are under "Commits and pushes" in
+  [CLAUDE.md](CLAUDE.md).
 - No details of any real network: no ISP names, device models, address ranges or keys, in
   code, comments, tests or commit messages. Use the RFC 5737 documentation ranges
   (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) or RFC 1918 ranges.
