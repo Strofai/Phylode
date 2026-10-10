@@ -1,0 +1,34 @@
+name: Commit messages
+
+# Checks every new commit against "Commits and pushes" in CLAUDE.md, whoever or whatever wrote
+# it. No path filter: a documentation-only change is checked too.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  messages:
+    name: commit messages
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the new commits
+        env:
+          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A branch's first push has no "before"; then only the pushed commit is checked.
+          if [[ "$BEFORE" =~ ^0+$ ]]; then
+            .github/scripts/check-commit-messages.sh "$AFTER"
+          else
+            .github/scripts/check-commit-messages.sh "$BEFORE..$AFTER"
+          fi
