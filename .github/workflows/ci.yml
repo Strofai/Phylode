@@ -1,12 +1,13 @@
 name: CI
 
-# Documentation-only changes skip CI: nothing here reads those files.
+# Every pull request runs CI, because main requires these checks before merging and a check
+# skipped by a path filter never reports, leaving the pull request unmergeable. A push to main
+# that only changes documentation skips it: nothing here reads those files.
 on:
   push:
     branches: [main]
     paths-ignore: ["**.md", "LICENSE-*", ".github/ISSUE_TEMPLATE/**", ".github/dependabot.yml"]
   pull_request:
-    paths-ignore: ["**.md", "LICENSE-*", ".github/ISSUE_TEMPLATE/**", ".github/dependabot.yml"]
 
 permissions:
   contents: read

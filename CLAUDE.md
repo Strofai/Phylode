@@ -106,15 +106,16 @@ like a product's release history, not a work log.
   change moved (test count, dependency count) goes in that change's commit, not a separate
   one. A breakage found before pushing is fixed inside the commit that introduced it; only
   a breakage found after it reached `main` gets its own `Fix:` commit.
-- **What reaches `main` is finished.** Every commit pushed to `main` builds and passes the
-  checks relevant to it: code or dependency changes need fmt, clippy, the tests and, when
-  `Cargo.toml` or `Cargo.lock` changed, `cargo deny`; documentation-only changes need none of
-  those (CI skips them too). Local checkpoints during long work are fine — tidy them into
+- **Everything reaches `main` through a pull request.** `main` accepts no direct pushes;
+  a pull request merges once CI and the commit message check pass, as a rebase, so each
+  commit lands as written. Before pushing a branch, run what the change touches locally: code
+  or dependency changes need fmt, clippy, the tests and, when `Cargo.toml` or `Cargo.lock`
+  changed, `cargo deny`. Local checkpoints during long work are fine — tidy them into
   coherent commits before pushing.
-- **What only CI can check goes through a branch first.** A change to `.github/workflows/`,
+- **What only CI can check passes on the branch first.** A change to `.github/workflows/`,
   or to anything `install.yml` exercises (`src/install/`, `deploy/`), cannot be verified
-  locally: push it to a branch, run the workflow there (`install.yml` has a manual trigger),
-  and bring it to `main` only once it passes. A step that has never run is not finished.
+  locally: let the pull request run it (`install.yml` also has a manual trigger) and merge
+  only once it passes. A step that has never run is not finished.
 - **Summary line:** one of five type prefixes, then an imperative sentence; at most 72
   characters in total, no trailing full stop. The sentence says what changes for the person
   using it rather than which files moved: `Fix: Keep the journal within its retention on a
