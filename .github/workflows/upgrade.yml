@@ -1,0 +1,82 @@
+name: Upgrade test
+
+# Installs the previous release the way its release notes say, then runs the update steps from
+# the README exactly as written, on a throwaway macOS runner. If the README's steps stop
+# working for someone on a release, this fails before anyone else finds out.
+
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", "deploy/**", "Cargo.toml", "Cargo.lock", "README.md", ".github/workflows/upgrade.yml"]
+  pull_request:
+    paths: ["src/**", "deploy/**", "Cargo.toml", "Cargo.lock", "README.md", ".github/workflows/upgrade.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upgrade:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      # The user's folder is a clone whose main is the code under test, so the README's
+      # `git pull` brings exactly this change. The previous release is the newest tag before it.
+      - name: Make a user's folder on the previous release
+        run: |
+          git switch -q -C main
+          prev=$(git describe --tags --abbrev=0 HEAD~1)
+          next=$(sed -nE 's/^version = "(.+)"$/\1/p' Cargo.toml | head -1)
+          echo "upgrading from $prev to $next"
+          git clone -q "$GITHUB_WORKSPACE" "$RUNNER_TEMP/user"
+          git -C "$RUNNER_TEMP/user" checkout -q "$prev"
+          echo "PREV=$prev" >> "$GITHUB_ENV"
+          echo "NEXT=$next" >> "$GITHUB_ENV"
+
+      - name: Install the previous release as its notes say
+        working-directory: ${{ runner.temp }}/user
+        run: |
+          cargo build --release
+          sudo ./target/release/phylode install
+          phylode --version | tee "$RUNNER_TEMP/before"
+          grep -qx "Phylode ${PREV#v}" "$RUNNER_TEMP/before" \
+            || { echo "::error::expected Phylode ${PREV#v} after installing $PREV"; exit 1; }
+          dig @127.0.0.1 apple.com +short +time=3 +tries=2 | grep -E '^[0-9.]+$' \
+            || { echo "::error::$PREV does not answer"; exit 1; }
+
+      # The steps are read from the README rather than copied here, so editing the README is
+      # what this checks. What breaks if you change it: the heading and the first bash block
+      # under it are how the steps are found.
+      - name: Update with the README's steps, exactly as written
+        working-directory: ${{ runner.temp }}/user
+        run: |
+          awk '/^## Update Phylode/{s=1} s && /^```bash/{b=1; next} b && /^```/{exit} b' \
+            "$GITHUB_WORKSPACE/README.md" > "$RUNNER_TEMP/steps.sh"
+          echo "--- the README's update steps:"; cat "$RUNNER_TEMP/steps.sh"
+          [ -s "$RUNNER_TEMP/steps.sh" ] || { echo "::error::no update steps found in the README"; exit 1; }
+          bash -euxo pipefail "$RUNNER_TEMP/steps.sh"
+
+      - name: The new version is installed and answering
+        run: |
+          phylode --version | tee "$RUNNER_TEMP/after"
+          grep -qx "Phylode $NEXT" "$RUNNER_TEMP/after" \
+            || { echo "::error::expected Phylode $NEXT after the update"; exit 1; }
+          dig @127.0.0.1 apple.com +short +time=3 +tries=2 | grep -E '^[0-9.]+$' \
+            || { echo "::error::no answer after the update"; exit 1; }
+          dig @127.0.0.1 iadsdk.apple.com +short +time=3 +tries=2 | grep -qx '0.0.0.0' \
+            || { echo "::error::not blocking after the update"; exit 1; }
+
+      - name: Uninstall
+        if: always()
+        run: sudo /usr/local/bin/phylode uninstall || true

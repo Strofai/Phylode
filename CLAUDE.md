@@ -86,7 +86,9 @@ Run this once before starting work and put the result in the first paragraph of 
   macOS runner whenever `src/` or `deploy/` changes — that is where installation gets verified, not
   on a contributor's own machine. `live.yml` drives a release build from 5003 source addresses on
   a throwaway runner whenever the rate limit changes, for behaviour one Mac cannot produce, and
-  measures peak memory with the strictest lists. `commits.yml` checks every new commit's
+  measures peak memory with the strictest lists. `upgrade.yml` installs the previous release
+  and runs the README's update steps exactly as written, whenever the program, the
+  deployment files or the README change. `commits.yml` checks every new commit's
   message against "Commits and pushes" below (`.github/scripts/check-commit-messages.sh`).
 - `.claude/settings.json` applies to every Claude Code session in this repository, cloud ones
   included: it keeps session links out of commits and pull requests and refuses force pushes,
