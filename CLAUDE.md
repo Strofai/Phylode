@@ -82,13 +82,13 @@ Run this once before starting work and put the result in the first paragraph of 
   plain language.
 - CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, clippy, the tests and
   `cargo deny` on every push and pull request; run the same locally before pushing.
-  `install.yml` runs `phylode install`, `on`, `off` and `uninstall` for real on a throwaway
-  macOS runner whenever `src/` or `deploy/` changes — that is where installation gets verified, not
-  on a contributor's own machine. `live.yml` drives a release build from 5003 source addresses on
-  a throwaway runner whenever the rate limit changes, for behaviour one Mac cannot produce, and
-  measures peak memory with the strictest lists. `upgrade.yml` installs the previous release
-  and runs the README's update steps exactly as written, whenever the program, the
-  deployment files or the README change. `commits.yml` checks every new commit's
+  Three more run on throwaway macOS runners for every pull request, and on pushes to `main`
+  that touch what they test. `install.yml` runs `phylode install`, `on`, `off` and
+  `uninstall` for real — that is where installation gets verified, not on a contributor's own
+  machine. `live.yml` drives a release build from 5003 source addresses, for behaviour one
+  Mac cannot produce, and measures peak memory with the strictest lists. `upgrade.yml`
+  installs the previous release and runs the README's update steps exactly as written.
+  `commits.yml` checks every new commit's
   message against "Commits and pushes" below (`.github/scripts/check-commit-messages.sh`).
 - `.claude/settings.json` applies to every Claude Code session in this repository, cloud ones
   included: it keeps session links out of commits and pull requests and refuses force pushes,
@@ -109,7 +109,8 @@ like a product's release history, not a work log.
   one. A breakage found before pushing is fixed inside the commit that introduced it; only
   a breakage found after it reached `main` gets its own `Fix:` commit.
 - **Everything reaches `main` through a pull request.** `main` accepts no direct pushes;
-  a pull request merges once CI and the commit message check pass, as a rebase, so each
+  a pull request merges once every check passes — CI, the commit message check and the
+  install, live and upgrade tests — as a rebase, so each
   commit lands as written. Before pushing a branch, run what the change touches locally: code
   or dependency changes need fmt, clippy, the tests and, when `Cargo.toml` or `Cargo.lock`
   changed, `cargo deny`. Local checkpoints during long work are fine — tidy them into
