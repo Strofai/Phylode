@@ -3,3 +3,8 @@
 disallowed-macros = [
   { path = "std::eprintln", reason = "panics on a failed write; use phylode::log_line!" },
 ]
+
+# unwrap_used and expect_used (Cargo.toml) apply to the program; a test that unwraps
+# fails loudly, which is what a test should do.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
