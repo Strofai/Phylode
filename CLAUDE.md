@@ -1,5 +1,7 @@
 # Phylode — project rules
 
+> Repository: Strofai/Phylode | public
+
 A DNS gatekeeper that runs on a Mac that stays on and blocks ads, trackers, malicious
 domains and chatty appliances for every device on the network (a home, an office, a
 studio, a school), with particular care for Apple devices. Written in Rust.
