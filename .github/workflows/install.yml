@@ -391,7 +391,10 @@ jobs:
               -w 'https://www.isc.org without validation: %{http_code}\n' https://www.isc.org || true
             sudo log show --last 3m --style compact --predicate 'process == "mDNSResponder"' \
               | grep -iE 'dnssec|validat|insecure|bogus' | tail -20 || true
-            echo "::error::the probe failed with 1.1.1.1 too, so this run cannot tell"; exit 1
+            # A runner that breaks validation even with 1.1.1.1 says nothing about Phylode, so the
+            # run warns and skips the Phylode half instead of failing every pull request.
+            sudo networksetup -setdnsservers "$service" empty
+            echo "::warning::the probe failed with 1.1.1.1 too, so this run cannot tell"; exit 0
           fi
           sudo networksetup -setdnsservers "$service" empty
           sudo phylode on
