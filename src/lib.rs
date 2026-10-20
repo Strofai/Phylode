@@ -33,6 +33,9 @@ macro_rules! log_line {
 /// Writes one line of command output (standard output), carrying on if it cannot be written.
 /// Use it and [`out!`] instead of `println!` and `print!` everywhere in this program.
 ///
+/// It carries on rather than stopping because an install or uninstall that loses its reader
+/// halfway would leave the Mac half set up.
+///
 /// What breaks if you change it: `println!` panics when the reader has gone, as it has once
 /// `phylode report | head -1` has its line, and the command ends with a crash message.
 #[macro_export]
