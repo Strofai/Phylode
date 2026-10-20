@@ -6,6 +6,12 @@
 //! `cargo test`. What breaks if you change the addresses: they must match the aliases the
 //! workflow adds, or every send fails to bind.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a helper that panics fails the test that called it, which is how a test should fail"
+)]
+
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 

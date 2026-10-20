@@ -1,6 +1,12 @@
 //! Runs the daily list updater for real, with a stand-in `curl` that serves lists from a
 //! folder, to check which downloads it swaps in.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a helper that panics fails the test that called it, which is how a test should fail"
+)]
+
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
