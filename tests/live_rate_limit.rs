@@ -11,6 +11,10 @@
     clippy::expect_used,
     reason = "a helper that panics fails the test that called it, which is how a test should fail"
 )]
+#![allow(
+    clippy::disallowed_macros,
+    reason = "the test harness captures what println! writes, so no reader goes away"
+)]
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
