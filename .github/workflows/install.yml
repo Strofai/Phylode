@@ -172,7 +172,7 @@ jobs:
           # The control: without it, a refusal below could mean the impostor never got the port.
           grep -q "Phylode serving on" "$RUNNER_TEMP/impostor-on.log" \
             || { cat "$RUNNER_TEMP/impostor-on.log"; echo "::error::a standard account could not take port 53 here"; exit 1; }
-          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          service=$(.github/scripts/primary-network-service.sh)
           before=$(networksetup -getdnsservers "$service")
           if out=$(sudo phylode on 2>&1); then
             echo "$out"; echo "::error::on pointed DNS at a port another program holds"; exit 1
@@ -371,11 +371,17 @@ jobs:
           EOF
           # Two signed domains and two unsigned ones.
           sites="https://www.isc.org https://www.cloudflare.com https://github.com https://www.apple.com"
-          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          service=$(.github/scripts/primary-network-service.sh)
           sudo networksetup -setdnsservers "$service" 1.1.1.1
           sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
-          swift "$RUNNER_TEMP/validating.swift" $sites \
-            || { echo "::error::the probe failed with 1.1.1.1 too, so this run cannot tell"; exit 1; }
+          if ! swift "$RUNNER_TEMP/validating.swift" $sites; then
+            # Shows whether 1.1.1.1 was in use and reachable, so the next run can tell why.
+            echo "service: $service"; networksetup -getdnsservers "$service"
+            networksetup -listnetworkserviceorder
+            scutil --dns | sed -n 1,20p
+            dig @1.1.1.1 www.isc.org +dnssec +time=3 +tries=1 | sed -n 1,20p || true
+            echo "::error::the probe failed with 1.1.1.1 too, so this run cannot tell"; exit 1
+          fi
           sudo networksetup -setdnsservers "$service" empty
           sudo phylode on
           sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
@@ -387,7 +393,7 @@ jobs:
       - name: on and off switch this Mac's DNS
         # A negated command (! cmd) never fails a step under set -e, so each check is explicit.
         run: |
-          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          service=$(.github/scripts/primary-network-service.sh)
           # DNS set by hand before `on` must be what `off` puts back.
           sudo networksetup -setdnsservers "$service" 1.1.1.1 9.9.9.9
           out=$(sudo phylode on)
@@ -410,7 +416,7 @@ jobs:
 
       - name: Uninstall restores DNS and leaves nothing running
         run: |
-          service=$(networksetup -listallnetworkservices | sed -n 2p)
+          service=$(.github/scripts/primary-network-service.sh)
           sudo phylode on
           sudo phylode uninstall
           if pgrep -x phylode; then echo "::error::the service is still running"; exit 1; fi
