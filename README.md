@@ -209,7 +209,7 @@ browsing history of everyone on your network, and your settings.
 
 The current version is 1.1.0; `main` is tested on every change and may be ahead of it.
 It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in `Cargo.lock`)
-and 288 tests. Four entry points — packets from devices, packets from upstream servers,
+and 289 tests. Four entry points — packets from devices, packets from upstream servers,
 the blocklist parser and the configuration parser — are fuzzed by a GitHub Actions
 workflow. With the strictest lists loaded (about 760,000 domains), Phylode peaked at
 132 MB of memory while reloading them and answering 5003 devices at once; the answer

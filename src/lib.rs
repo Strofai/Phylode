@@ -30,6 +30,28 @@ macro_rules! log_line {
     }};
 }
 
+/// Writes one line of command output (standard output), carrying on if it cannot be written.
+/// Use it and [`out!`] instead of `println!` and `print!` everywhere in this program.
+///
+/// What breaks if you change it: `println!` panics when the reader has gone, as it has once
+/// `phylode report | head -1` has its line, and the command ends with a crash message.
+#[macro_export]
+macro_rules! out_line {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
+/// [`out_line!`] without the line break.
+#[macro_export]
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = write!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 pub mod cache;
 pub mod cli;
 pub mod config;

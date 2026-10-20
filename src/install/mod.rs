@@ -197,9 +197,9 @@ pub fn install() -> Result<(), InstallError> {
         detail: error.to_string(),
     })?;
     if wait_for(LIST_WAIT, || config.blocklists().iter().all(|p| p.exists())) {
-        println!("    lists downloaded");
+        out_line!("    lists downloaded");
     } else {
-        println!(
+        out_line!(
             "    Warning: the lists are still downloading; the service starts now and begins blocking \
              as soon as they arrive"
         );
@@ -234,16 +234,16 @@ pub fn install() -> Result<(), InstallError> {
     }
     ensure_phylode_holds_port(&config)?;
     if wait_for(LOAD_WAIT, || logged_since(log_start, BLOCKLIST_LOADED)) {
-        println!("    answering and blocking");
+        out_line!("    answering and blocking");
     } else {
-        println!(
+        out_line!(
             "    Warning: Phylode is answering, but the lists are not loaded yet; it allows everything until they \
              are — check with: phylode status"
         );
     }
-    println!();
-    println!("Installed. This Mac is not using it yet; to switch it on:");
-    println!("  sudo phylode on");
+    out_line!();
+    out_line!("Installed. This Mac is not using it yet; to switch it on:");
+    out_line!("  sudo phylode on");
     Ok(())
 }
 
@@ -507,7 +507,7 @@ pub fn leftovers_message() -> String {
 }
 
 fn step(text: &str) {
-    println!("==> {text}");
+    out_line!("==> {text}");
 }
 
 fn require_root() -> Result<(), InstallError> {
@@ -677,7 +677,7 @@ fn ensure_service_user() -> Result<(), InstallError> {
         && directory_id(&record, "PrimaryGroupID").is_ok()
         && directory_id(&group, "PrimaryGroupID").is_ok();
     if complete {
-        println!("    already exists");
+        out_line!("    already exists");
         return Ok(());
     }
     remove_service_user(&record, &group);
@@ -691,7 +691,7 @@ fn ensure_service_user() -> Result<(), InstallError> {
         remove_service_user(&record, &group);
     }
     created?;
-    println!("    created with ID {id}");
+    out_line!("    created with ID {id}");
     Ok(())
 }
 
@@ -913,7 +913,7 @@ fn unload(label: &str) -> Result<(), InstallError> {
 /// so that failure is not reported.
 fn bootout(label: &str) {
     if run(LAUNCHCTL, &["bootout", &format!("system/{label}")]).is_err() {
-        println!("    {label} was not running");
+        out_line!("    {label} was not running");
     }
 }
 

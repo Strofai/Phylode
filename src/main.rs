@@ -22,12 +22,12 @@ use phylode::gatekeeper::Gatekeeper;
 use phylode::health;
 use phylode::install;
 use phylode::journal::{self, EventKind, Journal, LocalZone, OlderDetail};
-use phylode::log_line;
 use phylode::policy::{
     Allowlist, AttachedNetworks, Blocklist, RebindGuard, ServedNetworks, held_entries, held_path,
 };
 use phylode::report;
 use phylode::upstream::{self, Conductor};
+use phylode::{log_line, out, out_line};
 
 /// How often to check whether the list files changed on disk.
 ///
@@ -151,11 +151,11 @@ impl Command {
     fn run(self) -> ExitCode {
         match self {
             Self::Help => {
-                println!("{USAGE}");
+                out_line!("{USAGE}");
                 ExitCode::SUCCESS
             }
             Self::Version => {
-                println!("Phylode {}", env!("CARGO_PKG_VERSION"));
+                out_line!("Phylode {}", env!("CARGO_PKG_VERSION"));
                 ExitCode::SUCCESS
             }
             Self::Serve { config_path } => serve(&config_path),
@@ -183,32 +183,32 @@ impl Command {
                 code
             }
             Self::On => finish(install::on().map(|switched| {
-                println!("This Mac now uses Phylode for DNS on:");
+                out_line!("This Mac now uses Phylode for DNS on:");
                 for service in switched.services {
-                    println!("  {service}");
+                    out_line!("  {service}");
                 }
-                println!("To switch back: sudo phylode off");
-                println!();
-                println!("{}", network_hint(switched.network_address));
+                out_line!("To switch back: sudo phylode off");
+                out_line!();
+                out_line!("{}", network_hint(switched.network_address));
             })),
             Self::Off => finish(install::off().map(|services| {
                 if services.is_empty() {
-                    println!("No network service was using Phylode; nothing changed.");
+                    out_line!("No network service was using Phylode; nothing changed.");
                 } else {
-                    println!("DNS is back to how it was before phylode on, on:");
+                    out_line!("DNS is back to how it was before phylode on, on:");
                     for service in services {
-                        println!("  {service}");
+                        out_line!("  {service}");
                     }
                 }
             })),
             Self::Uninstall => finish(install::uninstall().map(|restored| {
                 for service in restored {
-                    println!("DNS back as it was: {service}");
+                    out_line!("DNS back as it was: {service}");
                 }
-                println!("Removed.\n\n{}", install::leftovers_message());
+                out_line!("Removed.\n\n{}", install::leftovers_message());
             })),
             Self::Forget => finish(install::forget().map(|removed| {
-                println!(
+                out_line!(
                     "Deleted {}: every recorded lookup and saved weekly summary. Lookups from now \
                      on are kept as the journal setting says.",
                     plural(removed, "file", "files")
@@ -251,7 +251,7 @@ fn edit(config_path: &Path, domain: &str, action: EditFn) -> ExitCode {
     };
     match action(domain, config.allowlist(), config.user_blocklist()) {
         Ok(outcome) => {
-            println!("{}", outcome.message());
+            out_line!("{}", outcome.message());
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -266,13 +266,13 @@ fn status(config_path: &Path) -> ExitCode {
         return ExitCode::from(2);
     };
 
-    println!("Configuration: {}", config_path.display());
+    out_line!("Configuration: {}", config_path.display());
     let extra: Vec<String> = config
         .served_networks()
         .iter()
         .map(ToString::to_string)
         .collect();
-    println!(
+    out_line!(
         "Answers: this Mac and devices on private network ranges{}",
         if extra.is_empty() {
             String::new()
@@ -281,35 +281,35 @@ fn status(config_path: &Path) -> ExitCode {
         }
     );
     match install::network_address(&config) {
-        Some(address) => println!("Other devices reach it at: {address}"),
-        None => println!("Other devices reach it at: unknown (this Mac is offline)"),
+        Some(address) => out_line!("Other devices reach it at: {address}"),
+        None => out_line!("Other devices reach it at: unknown (this Mac is offline)"),
     }
-    println!(
+    out_line!(
         "Time zone for journal dates: {} (this Mac's setting)",
         local_zone().name()
     );
-    println!(
+    out_line!(
         "Upstreams: {}, all encrypted; never downgrades to plaintext when unreachable",
         plural(config.upstreams().len(), "server", "servers")
     );
     for upstream in config.upstreams() {
-        println!(
+        out_line!(
             "  · {:?} {} (certificate name {})",
             upstream.protocol(),
             upstream.ip(),
             upstream.server_name()
         );
     }
-    println!(
+    out_line!(
         "Protection: {} ({}, updated daily)",
         config.protection().name(),
         config.protection().lists()
     );
-    println!(
+    out_line!(
         "Blocked answers cached by devices for: {:?}",
         config.block_ttl()
     );
-    println!(
+    out_line!(
         "Query journal: {}, kept {} days, journal = {}",
         config.journal_dir().display(),
         config.journal_retention_days(),
@@ -317,25 +317,25 @@ fn status(config_path: &Path) -> ExitCode {
     );
     match journal::older_detail(config.journal_dir(), config.journal()) {
         OlderDetail::None => {}
-        OlderDetail::NotApplied(running) => println!(
+        OlderDetail::NotApplied(running) => out_line!(
             "  The running service still keeps {}; journal = {} applies once it restarts: \
              sudo phylode install",
             running.name(),
             config.journal().name()
         ),
-        OlderDetail::Until(day) => println!(
+        OlderDetail::Until(day) => out_line!(
             "  Lookups up to {day} keep more than {} does. They are deleted after {}, and weekly \
              summaries saved by then after 12 weeks; to delete both now: sudo phylode forget",
             config.journal().name(),
             days_after(&day, config.journal_retention_days())
         ),
     }
-    println!(
+    out_line!(
         "Blocklists: {}",
         plural(config.blocklists().len(), "file", "files")
     );
     for path in config.blocklists() {
-        println!(
+        out_line!(
             "  · {}{}{}{}",
             path.display(),
             exists_mark(path),
@@ -343,7 +343,7 @@ fn status(config_path: &Path) -> ExitCode {
             unusable_mark(path)
         );
         if let Some(entries) = held_entries(path) {
-            println!(
+            out_line!(
                 "    Warning: the last update had only {}, under half of this list, so it was set \
                  aside and this list is still in use. If the list really did shrink, use the \
                  update with: sudo mv {} {}",
@@ -357,52 +357,52 @@ fn status(config_path: &Path) -> ExitCode {
     let blocklist = Blocklist::new();
     let optional: Vec<&Path> = config.user_blocklist().into_iter().collect();
     match blocklist.load_all(config.blocklists(), &optional) {
-        Ok(_) => println!(
+        Ok(_) => out_line!(
             "  {} will be blocked in total",
             plural(blocklist.loaded_len().unwrap_or(0), "domain", "domains")
         ),
         Err(error) => match blocklist.loaded_len() {
-            Some(loaded) => println!(
+            Some(loaded) => out_line!(
                 "  Warning: {error}. The service keeps any list it loaded before; if it \
                  restarted now it would start with only the lists that read ({})",
                 plural(loaded, "domain", "domains")
             ),
-            None => println!(
+            None => out_line!(
                 "  Warning: {error}. The service keeps any list it loaded before, but would \
                  start with none if it restarted now"
             ),
         },
     }
     match config.user_blocklist() {
-        Some(path) => println!(
+        Some(path) => out_line!(
             "Your own blocklist: {}{}{}",
             path.display(),
             exists_mark(path),
             unusable_mark(path)
         ),
-        None => println!("Your own blocklist: no user_blocklist set in the configuration"),
+        None => out_line!("Your own blocklist: no user_blocklist set in the configuration"),
     }
     match config.allowlist() {
         Some(path) => {
             let allowlist = Allowlist::new();
             match allowlist.load_from_file(path) {
-                Ok(_) => println!(
+                Ok(_) => out_line!(
                     "Your own allowlist: {} ({})",
                     path.display(),
                     plural(allowlist.user_len(), "entry", "entries")
                 ),
-                Err(error) => println!("Your own allowlist: not loaded ({error})"),
+                Err(error) => out_line!("Your own allowlist: not loaded ({error})"),
             }
         }
-        None => println!("Your own allowlist: no allowlist set in the configuration"),
+        None => out_line!("Your own allowlist: no allowlist set in the configuration"),
     }
-    println!(
+    out_line!(
         "Always allowed (hardcoded, not configurable): {}",
         Allowlist::hard_rules().join(", ")
     );
     match config.internal_domains() {
-        [] => println!("Rebinding defense: on, with no exempt domains"),
-        domains => println!(
+        [] => out_line!("Rebinding defense: on, with no exempt domains"),
+        domains => out_line!(
             "Rebinding defense: on; these domains are exempt (may point inward): {}",
             domains.join(", ")
         ),
@@ -413,7 +413,7 @@ fn status(config_path: &Path) -> ExitCode {
             .iter()
             .map(ToString::to_string)
             .collect();
-        println!(
+        out_line!(
             "NAT64 prefixes the rebinding defense also reads: 64:ff9b::/96, {}",
             prefixes.join(", ")
         );
@@ -428,14 +428,14 @@ fn weekly_report(config_path: &Path, days: u32) -> ExitCode {
     // The journal holds nothing older than its retention, so a longer span only adds empty days.
     let kept = config.journal_retention_days();
     if days > kept {
-        println!("The journal keeps {kept} days, so this covers the last {kept}.\n");
+        out_line!("The journal keeps {kept} days, so this covers the last {kept}.\n");
     }
     let dates = report::recent_days(journal::unix_now(), &local_zone(), days.min(kept.max(1)));
     let summary = report::Summary::gather(config.journal_dir(), &dates);
-    println!("{}", summary.render());
+    out_line!("{}", summary.render());
     let archive = config.journal_dir().join(report::archive::ARCHIVE_DIR);
     if archive.is_dir() {
-        println!(
+        out_line!(
             "Past weekly summaries are kept in {} (12 weeks)",
             archive.display()
         );
@@ -571,7 +571,7 @@ fn diagnostics(config_path: &Path) -> ExitCode {
         }
     }
 
-    print!("{}", diagnostics::render(&facts));
+    out!("{}", diagnostics::render(&facts));
     ExitCode::SUCCESS
 }
 

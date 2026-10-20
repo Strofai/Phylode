@@ -1,7 +1,10 @@
 # eprintln! panics when standard error cannot be written (a full disk), ending whichever
-# background task it ran in; log_line! carries on instead.
+# background task it ran in; log_line! carries on instead. println! and print! panic the
+# same way once the reader has gone (phylode report | head -1); out_line! and out! do not.
 disallowed-macros = [
   { path = "std::eprintln", reason = "panics on a failed write; use phylode::log_line!" },
+  { path = "std::println", reason = "panics once the reader has gone; use phylode::out_line!" },
+  { path = "std::print", reason = "panics once the reader has gone; use phylode::out!" },
 ]
 
 # unwrap_used and expect_used (Cargo.toml) apply to the program; a test that unwraps
