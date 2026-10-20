@@ -181,4 +181,5 @@ like a product's release history, not a work log.
   not even unsigned domains, unless signatures and proofs reach the device unchanged.**
   Proving a domain is unsigned takes a signed negative answer from its parent zone; Apple
   treats an answer that fails validation as no answer at all (WWDC22 session 10079). The
-  install workflow checks this against a 1.1.1.1 control.
+  install workflow checks this against a 1.1.1.1 control; when the control fails too, the
+  run warns that it cannot tell rather than failing.
