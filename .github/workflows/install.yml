@@ -380,6 +380,17 @@ jobs:
             networksetup -listnetworkserviceorder
             scutil --dns | sed -n 1,20p
             dig @1.1.1.1 www.isc.org +dnssec +time=3 +tries=1 | sed -n 1,20p || true
+            # Validation fetches the root keys, which can outgrow UDP and move to TCP; a request
+            # without validation tells a validation failure from no connection at all.
+            for transport in +notcp +tcp; do
+              echo "root DNSKEY over $transport:"
+              dig @1.1.1.1 . DNSKEY +dnssec "$transport" +time=3 +tries=1 \
+                | grep -E 'status:|flags:|MSG SIZE|timed out|truncated' || true
+            done
+            curl -sS -o /dev/null --max-time 10 \
+              -w 'https://www.isc.org without validation: %{http_code}\n' https://www.isc.org || true
+            sudo log show --last 3m --style compact --predicate 'process == "mDNSResponder"' \
+              | grep -iE 'dnssec|validat|insecure|bogus' | tail -20 || true
             echo "::error::the probe failed with 1.1.1.1 too, so this run cannot tell"; exit 1
           fi
           sudo networksetup -setdnsservers "$service" empty
