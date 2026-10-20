@@ -26,3 +26,11 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "sync", "tim
 # about an unknown cfg.
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+# A panic ends whichever task it runs in, so errors are returned rather than unwrapped;
+# a call that truly cannot fail says why in #[allow(..., reason = "...")].
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+fn_params_excessive_bools = "warn"
+undocumented_unsafe_blocks = "warn"
