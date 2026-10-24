@@ -64,12 +64,12 @@ impl LocalZone {
 /// A local calendar date and time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Civil {
-    pub year: i64,
-    pub month: u32,
-    pub day: u32,
-    pub hour: u32,
-    pub minute: u32,
-    pub second: u32,
+    year: i64,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
 }
 
 impl Civil {
