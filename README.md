@@ -207,7 +207,7 @@ browsing history of everyone on your network, and your settings.
 
 ## Project status
 
-The current version is 1.1.0; `main` is tested on every change and may be ahead of it.
+The current version is 1.1.1; `main` is tested on every change and may be ahead of it.
 It's about 12,000 lines of Rust with 11 direct dependencies (181 packages in `Cargo.lock`)
 and 289 tests. Four entry points — packets from devices, packets from upstream servers,
 the blocklist parser and the configuration parser — are fuzzed by a GitHub Actions
