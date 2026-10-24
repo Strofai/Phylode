@@ -20,6 +20,17 @@ use crate::health::PROBE_NAME;
 use crate::journal;
 use crate::report::archive;
 
+mod account;
+mod permissions;
+mod port;
+mod switch;
+
+use account::{directory_id, ensure_service_user};
+use permissions::require_only_administrators_can_change;
+use port::ensure_phylode_holds_port;
+
+pub use switch::{SwitchedOn, network_address, off, on, this_mac_uses_it};
+
 /// Where `install` writes the configuration, and where every command reads it by default.
 pub const CONFIG_PATH: &str = "/usr/local/etc/phylode.conf";
 
@@ -69,13 +80,8 @@ pub const BLOCKLIST_LOADED: &str = "Blocklist loaded";
 /// The service's error log, as set by `StandardErrorPath` in the gatekeeper plist.
 pub const SERVICE_LOG: &str = "/var/log/phylode/stderr.log";
 
-const DSCL: &str = "/usr/bin/dscl";
 const LAUNCHCTL: &str = "/bin/launchctl";
-const NETWORKSETUP: &str = "/usr/sbin/networksetup";
 const SOCKETFILTERFW: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
-const LSOF: &str = "/usr/sbin/lsof";
-/// launchd's process ID. It holds the sockets it binds for a job as long as the job is loaded.
-const LAUNCHD_PID: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum InstallError {
@@ -247,60 +253,6 @@ pub fn install() -> Result<(), InstallError> {
     Ok(())
 }
 
-/// What `on` changed, and where the rest of the network can reach the service.
-pub struct SwitchedOn {
-    /// This Mac's network services, now resolving through the gatekeeper.
-    pub services: Vec<String>,
-    /// See [`network_address`].
-    pub network_address: Option<IpAddr>,
-}
-
-/// Points every network service on this Mac at the gatekeeper, after checking it answers and
-/// holds its port alone — pointing DNS at a service that is not answering would leave the Mac
-/// unable to resolve anything, and at a port another program holds would hand that program
-/// every lookup.
-///
-/// Each service's DNS servers from before are saved, so `off` can put them back. A service
-/// that cannot be changed does not stop the others; the error afterwards names it.
-pub fn on() -> Result<SwitchedOn, InstallError> {
-    require_root()?;
-    let config = Config::load(Path::new(CONFIG_PATH)).map_err(|error| InstallError::Config {
-        detail: error.to_string(),
-    })?;
-    if !answers_within(&config, ANSWER_WAIT) {
-        return Err(InstallError::NotAnswering);
-    }
-    ensure_phylode_holds_port(&config)?;
-    let saved_path = Path::new(DNS_BEFORE_ON_PATH);
-    let mut saved = read_saved_dns(saved_path);
-    let mut services = Vec::new();
-    let mut failed = Vec::new();
-    for service in network_services()? {
-        let switched = run(NETWORKSETUP, &["-getdnsservers", &service]).and_then(|servers| {
-            // Switched on twice, the first `on` already saved what was there before.
-            if !points_at_gatekeeper(&servers) {
-                saved.insert(service.clone(), dns_servers(&servers));
-            }
-            run(NETWORKSETUP, &["-setdnsservers", &service, "127.0.0.1"])
-        });
-        match switched {
-            Ok(_) => services.push(service),
-            Err(error) => failed.push(format!("{service} ({error})")),
-        }
-    }
-    write_saved_dns(saved_path, &saved)?;
-    if !failed.is_empty() {
-        return Err(InstallError::SomeServices {
-            changed: services.join(", "),
-            failed: failed.join("; "),
-        });
-    }
-    Ok(SwitchedOn {
-        services,
-        network_address: network_address(&config),
-    })
-}
-
 /// Deletes every recorded lookup and every saved weekly summary, then restarts the service so
 /// it starts today's file afresh; launchd holds port 53 throughout, so lookups keep being
 /// answered. The service's events stay: they hold no lookups. Returns how many files went.
@@ -351,118 +303,6 @@ fn files_in(directory: &Path, wanted: impl Fn(&str) -> bool) -> Result<Vec<PathB
         .map(|entry| entry.path())
         .filter(|path| path.is_file())
         .collect())
-}
-
-/// The address other devices on the network use to reach this Mac: the one it sends from
-/// towards its first upstream. `None` when there is no route (offline).
-///
-/// Connecting a UDP socket only picks a route; nothing is sent.
-pub fn network_address(config: &Config) -> Option<IpAddr> {
-    let upstream = config.upstreams().first()?.ip();
-    let local: SocketAddr = match upstream {
-        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-    };
-    let socket = std::net::UdpSocket::bind(local).ok()?;
-    socket.connect((upstream, 53)).ok()?;
-    Some(socket.local_addr().ok()?.ip()).filter(|ip| !ip.is_unspecified())
-}
-
-/// Returns every network service that points at the gatekeeper to the DNS servers it had
-/// before `on` (automatic when none were saved). Returns the services changed; services
-/// configured with other resolvers are left alone.
-///
-/// What breaks if you change it: stop at the first service that fails and the ones after it
-/// keep pointing at a service that `uninstall` is about to remove — those resolve nothing.
-pub fn off() -> Result<Vec<String>, InstallError> {
-    require_root()?;
-    let saved_path = Path::new(DNS_BEFORE_ON_PATH);
-    let saved = read_saved_dns(saved_path);
-    let mut restored = Vec::new();
-    let mut failed = Vec::new();
-    for service in network_services()? {
-        let result = run(NETWORKSETUP, &["-getdnsservers", &service]).and_then(|servers| {
-            if !points_at_gatekeeper(&servers) {
-                return Ok(false);
-            }
-            let before = saved.get(&service).map_or("empty", String::as_str);
-            let mut args = vec!["-setdnsservers", service.as_str()];
-            args.extend(before.split(' '));
-            run(NETWORKSETUP, &args).map(|_| true)
-        });
-        match result {
-            Ok(true) => restored.push(service),
-            Ok(false) => {}
-            Err(error) => failed.push(format!("{service} ({error})")),
-        }
-    }
-    if !failed.is_empty() {
-        return Err(InstallError::SomeServices {
-            changed: restored.join(", "),
-            failed: failed.join("; "),
-        });
-    }
-    remove_if_present(saved_path)?;
-    Ok(restored)
-}
-
-/// Whether any of this Mac's network services points at the gatekeeper. `false` when that
-/// cannot be read.
-///
-/// Used after a failed install: an update that stopped the old service but could not start
-/// the new one leaves such a Mac resolving nothing, and `phylode off` is the way back.
-pub fn this_mac_uses_it() -> bool {
-    network_services().is_ok_and(|services| {
-        services.iter().any(|service| {
-            run(NETWORKSETUP, &["-getdnsservers", service])
-                .is_ok_and(|servers| points_at_gatekeeper(&servers))
-        })
-    })
-}
-
-/// Where `on` keeps each network service's DNS servers from before, one `service<TAB>servers`
-/// line each, `empty` meaning automatic.
-const DNS_BEFORE_ON_PATH: &str = "/usr/local/etc/phylode/dns-before-on.tsv";
-
-/// The servers `networksetup -getdnsservers` listed, space-separated, or `empty` for none
-/// (it prints a sentence rather than an empty list).
-///
-/// What breaks if you change it: only addresses may come out of here, since they go back to
-/// `networksetup` as arguments.
-fn dns_servers(output: &str) -> String {
-    let servers: Vec<&str> = output
-        .split_whitespace()
-        .filter(|word| word.parse::<IpAddr>().is_ok())
-        .collect();
-    if servers.is_empty() {
-        "empty".to_string()
-    } else {
-        servers.join(" ")
-    }
-}
-
-/// The saved servers by service. A missing or unreadable file, or a line that is not a
-/// service and addresses, counts as nothing saved: that service goes back to automatic.
-fn read_saved_dns(path: &Path) -> std::collections::BTreeMap<String, String> {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let (service, servers) = line.split_once('\t')?;
-            (dns_servers(servers) == servers).then(|| (service.to_string(), servers.to_string()))
-        })
-        .collect()
-}
-
-fn write_saved_dns(
-    path: &Path,
-    saved: &std::collections::BTreeMap<String, String>,
-) -> Result<(), InstallError> {
-    let text: String = saved
-        .iter()
-        .map(|(service, servers)| format!("{service}\t{servers}\n"))
-        .collect();
-    write_file(path, &text, 0o644, 0, 0)
 }
 
 /// Switches DNS back to automatic, stops and removes both launchd jobs, the updater and the
@@ -523,123 +363,6 @@ pub fn running_as_root() -> bool {
     run("/usr/bin/id", &["-u"]).is_ok_and(|uid| uid.trim() == "0")
 }
 
-/// Fails unless `dir` (or, if it does not exist yet, the nearest folder above it) and every
-/// folder above that can only be changed by root or an administrator. Administrators can
-/// become root anyway, so only a standard account being able to write there is a risk.
-///
-/// What breaks if you change it: without this, a standard account that can write to, say,
-/// `/usr/local/bin` swaps in its own program and the next `sudo phylode` runs it as root.
-fn require_only_administrators_can_change(dir: &Path, admin_gid: u32) -> Result<(), InstallError> {
-    use std::os::unix::fs::MetadataExt;
-
-    let existing = dir
-        .ancestors()
-        .find(|p| p.exists())
-        .unwrap_or(Path::new("/"));
-    for folder in folders_to_check(existing)? {
-        let folder = folder.as_path();
-        let meta = fs::metadata(folder).map_err(|source| io_error(folder, source))?;
-        let safe =
-            match writers(meta.uid(), meta.gid(), meta.mode(), admin_gid) {
-                Writers::RootOrAdministrators => true,
-                Writers::Owner(uid) => is_administrator(uid)?,
-                Writers::Anyone => false,
-            } && !acl_lets_others_write(&run("/bin/ls", &["-lde", &folder.to_string_lossy()])?);
-        if !safe {
-            return Err(InstallError::UnprotectedDirectory {
-                path: folder.to_path_buf(),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Every folder whose writers decide what ends up at `path`: its ancestors as written and
-/// the ancestors of the folder it resolves to, each once.
-///
-/// What breaks if you change it: checking only the resolved folder misses a symbolic link
-/// along the written path — whoever can change the folder holding that link can point it
-/// somewhere protected for the check, then back at their own folder afterwards.
-fn folders_to_check(path: &Path) -> Result<std::collections::BTreeSet<PathBuf>, InstallError> {
-    let real = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
-    Ok(path
-        .ancestors()
-        .chain(real.ancestors())
-        .map(Path::to_path_buf)
-        .collect())
-}
-
-/// Who, besides root, can change a folder with this owner, group and mode.
-#[derive(Debug, PartialEq, Eq)]
-enum Writers {
-    RootOrAdministrators,
-    /// Root, administrators, and this owner, who may or may not be an administrator.
-    Owner(u32),
-    /// Every account, or a group other than wheel and admin.
-    Anyone,
-}
-
-fn writers(uid: u32, gid: u32, mode: u32, admin_gid: u32) -> Writers {
-    let group_writable = mode & 0o020 != 0;
-    let world_writable = mode & 0o002 != 0;
-    if world_writable || (group_writable && gid != 0 && gid != admin_gid) {
-        Writers::Anyone
-    } else if uid == 0 {
-        Writers::RootOrAdministrators
-    } else {
-        Writers::Owner(uid)
-    }
-}
-
-/// Accounts an access control entry may grant change rights to without making a folder unsafe.
-const ACL_TRUSTED: [&str; 3] = ["user:root", "group:wheel", "group:admin"];
-
-/// Access control rights that change a folder or what is in it, as `ls -le` names them.
-const ACL_WRITE_RIGHTS: [&str; 10] = [
-    "write",
-    "append",
-    "add_file",
-    "add_subdirectory",
-    "delete",
-    "delete_child",
-    "writeattr",
-    "writeextattr",
-    "writesecurity",
-    "chown",
-];
-
-/// Whether an `ls -lde` listing shows an access control entry that lets an account other than
-/// root or an administrator change the folder, or the folders install later creates inside it
-/// (entries meant only for those are counted too).
-/// What breaks if you change it: the owner, group and mode checks alone miss a macOS access
-/// control entry granting a standard account the same rights.
-fn acl_lets_others_write(listing: &str) -> bool {
-    listing.lines().skip(1).any(|entry| {
-        let Some((head, rights)) = entry.trim().rsplit_once(' ') else {
-            return false;
-        };
-        let Some(principal) = head.strip_suffix(" allow") else {
-            return false;
-        };
-        let principal = principal.strip_suffix(" inherited").unwrap_or(principal);
-        let principal = principal
-            .split_once(": ")
-            .map_or(principal, |(_, name)| name);
-        !ACL_TRUSTED.contains(&principal)
-            && rights
-                .split(',')
-                .any(|right| ACL_WRITE_RIGHTS.contains(&right))
-    })
-}
-
-fn is_administrator(uid: u32) -> Result<bool, InstallError> {
-    let answer = run(
-        "/usr/bin/dsmemberutil",
-        &["checkmembership", "-u", &uid.to_string(), "-G", "admin"],
-    )?;
-    Ok(answer.trim() == "user is a member of the group")
-}
-
 /// Runs a program and returns its standard output; a non-zero exit is an error carrying the
 /// program's own message.
 fn run(program: &str, args: &[&str]) -> Result<String, InstallError> {
@@ -663,84 +386,6 @@ fn run(program: &str, args: &[&str]) -> Result<String, InstallError> {
             },
         })
     }
-}
-
-///
-/// Creating takes seven `dscl` steps, so it is all or nothing: a step that fails removes what
-/// the earlier ones made, and a half-made account left by an older version is removed and made
-/// again. What breaks if you change it: count a half-made account as existing and every later
-/// install stops at reading its ID, with no way forward but `dscl` by hand.
-fn ensure_service_user() -> Result<(), InstallError> {
-    let record = format!("/Users/{SERVICE_USER}");
-    let group = format!("/Groups/{SERVICE_USER}");
-    let complete = directory_id(&record, "UniqueID").is_ok()
-        && directory_id(&record, "PrimaryGroupID").is_ok()
-        && directory_id(&group, "PrimaryGroupID").is_ok();
-    if complete {
-        out_line!("    already exists");
-        return Ok(());
-    }
-    remove_service_user(&record, &group);
-    let users = run(DSCL, &[".", "-list", "/Users", "UniqueID"])?;
-    let groups = run(DSCL, &[".", "-list", "/Groups", "PrimaryGroupID"])?;
-    let id = next_system_id(&users, &groups)
-        .ok_or(InstallError::NoFreeId)?
-        .to_string();
-    let created = create_service_user(&record, &group, &id);
-    if created.is_err() {
-        remove_service_user(&record, &group);
-    }
-    created?;
-    out_line!("    created with ID {id}");
-    Ok(())
-}
-
-/// Deletes whatever exists of the service account and its group; either may be missing.
-fn remove_service_user(record: &str, group: &str) {
-    for path in [record, group] {
-        let _ = run(DSCL, &[".", "-delete", path]);
-    }
-}
-
-fn create_service_user(record: &str, group: &str, id: &str) -> Result<(), InstallError> {
-    for args in [
-        vec![".", "-create", record],
-        vec![".", "-create", record, "UserShell", "/usr/bin/false"],
-        vec![".", "-create", record, "RealName", "Phylode Gatekeeper"],
-        vec![".", "-create", record, "UniqueID", id],
-        vec![".", "-create", record, "PrimaryGroupID", id],
-        vec![".", "-create", record, "NFSHomeDirectory", "/var/empty"],
-        vec![".", "-create", group, "PrimaryGroupID", id],
-    ] {
-        run(DSCL, &args)?;
-    }
-    Ok(())
-}
-
-/// The highest ID below 500 that no account or group uses, so the same number is free for
-/// both. `None` when every one from 499 down to 400 is taken.
-///
-/// What breaks if you change it: Apple adds system accounts upward from the low hundreds, and
-/// a macOS update deletes any account holding an ID it wants (macOS 15 took 301–304 from Nix's
-/// build accounts). Counting down from 499 keeps as far from that as the system range allows.
-fn next_system_id(users: &str, groups: &str) -> Option<u32> {
-    let taken: std::collections::HashSet<u32> = users
-        .lines()
-        .chain(groups.lines())
-        .filter_map(|line| line.split_whitespace().nth(1)?.parse::<u32>().ok())
-        .collect();
-    (400..500).rev().find(|id| !taken.contains(id))
-}
-
-/// Reads a numeric attribute such as `UniqueID` from a directory service record.
-fn directory_id(record: &str, attribute: &str) -> Result<u32, InstallError> {
-    run(DSCL, &[".", "-read", record, attribute])?
-        .split_whitespace()
-        .nth(1)
-        .and_then(|value| value.parse().ok())
-        .ok_or_else(|| InstallError::UnknownId {
-            record: record.to_string(),
-        })
 }
 
 /// Puts this binary at [`BINARY_PATH`] by copying it beside the target and renaming it over.
@@ -946,104 +591,6 @@ fn logged_since(start: u64, marker: &str) -> bool {
     })
 }
 
-/// Checks that launchd and the Phylode job it started are the only programs holding the
-/// service's port. A reply on that port proves nothing by itself: while launchd is not holding
-/// it, macOS lets any account bind a port below 1024 on every address.
-///
-/// What breaks if you change it: check only that something answers, and a program another
-/// account left listening receives every lookup this Mac and the network make.
-fn ensure_phylode_holds_port(config: &Config) -> Result<(), InstallError> {
-    let port = config.listen().first().map_or(53, SocketAddr::port);
-    let job = run(LAUNCHCTL, &["print", &format!("system/{GATEKEEPER_LABEL}")])
-        .ok()
-        .and_then(|printed| job_pid(&printed));
-    let listing = list_port(port)?;
-    others_on_port(&holders(&listing, port), job)
-        .map_err(|holders| InstallError::PortTaken { port, holders })
-}
-
-/// `lsof` output for every socket on `port`, as process, command and address fields. Empty when
-/// nothing holds it.
-fn list_port(port: u16) -> Result<String, InstallError> {
-    let args = [
-        "-nP".to_string(),
-        format!("-iUDP:{port}"),
-        format!("-iTCP:{port}"),
-        "-F".to_string(),
-        "pcn".to_string(),
-    ];
-    let output = Command::new(LSOF)
-        .args(&args)
-        .output()
-        .map_err(|source| InstallError::Spawn {
-            program: LSOF.to_string(),
-            source,
-        })?;
-    // lsof also exits unsuccessfully when nothing matches; only then is standard error empty.
-    if output.status.success() || output.stderr.is_empty() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        Err(InstallError::Failed {
-            command: format!("{LSOF} {}", args.join(" ")),
-            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        })
-    }
-}
-
-/// The process ID in `launchctl print` output for a running job. `None` while it is not running.
-fn job_pid(printed: &str) -> Option<u32> {
-    printed
-        .lines()
-        .find_map(|line| line.strip_prefix("\tpid = "))
-        .and_then(|pid| pid.trim().parse().ok())
-}
-
-/// Each process in `lsof -F pcn` output with a socket whose own end is `port`: one listening
-/// there, or one that accepted a connection there. A connection this Mac made to another
-/// machine's port does not count.
-fn holders(listing: &str, port: u16) -> Vec<(u32, String)> {
-    let own_end = format!(":{port}");
-    let mut found: Vec<(u32, String)> = Vec::new();
-    let mut process: Option<u32> = None;
-    let mut command = String::new();
-    for line in listing.lines() {
-        match line.split_at_checked(1) {
-            Some(("p", pid)) => {
-                process = pid.parse().ok();
-                command.clear();
-            }
-            Some(("c", name)) => command = name.to_string(),
-            Some(("n", address)) => {
-                let local = address.split("->").next().unwrap_or(address);
-                if let Some(pid) = process
-                    && local.ends_with(&own_end)
-                    && !found.iter().any(|(seen, _)| *seen == pid)
-                {
-                    found.push((pid, command.clone()));
-                }
-            }
-            _ => {}
-        }
-    }
-    found
-}
-
-/// `Ok` when `job` is among the holders and everyone else is launchd; otherwise names who
-/// else holds the port.
-fn others_on_port(holders: &[(u32, String)], job: Option<u32>) -> Result<(), String> {
-    let others: Vec<String> = holders
-        .iter()
-        .filter(|(pid, _)| *pid != LAUNCHD_PID && Some(*pid) != job)
-        .map(|(pid, command)| format!("{command} (process {pid})"))
-        .collect();
-    let ours = job.is_some_and(|job| holders.iter().any(|(pid, _)| *pid == job));
-    match (others.is_empty(), ours) {
-        (true, true) => Ok(()),
-        (true, false) => Err("no program Phylode started".to_string()),
-        (false, _) => Err(others.join(", ")),
-    }
-}
-
 /// Whether the service answers a health-check query on its first listen address, probing
 /// once a second until `limit` passes (a zero limit probes once). The health-check name is
 /// answered locally, so this works offline.
@@ -1078,95 +625,10 @@ fn reachable(addr: SocketAddr) -> SocketAddr {
     }
 }
 
-/// The names of this Mac's network services.
-fn network_services() -> Result<Vec<String>, InstallError> {
-    Ok(parse_network_services(&run(
-        NETWORKSETUP,
-        &["-listallnetworkservices"],
-    )?))
-}
-
-/// Parses `networksetup -listallnetworkservices`: the first line is a notice, a leading `*`
-/// marks a disabled service, and names may contain spaces — even at either end, so they are
-/// kept exactly as listed or `networksetup` cannot find them again.
-fn parse_network_services(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .skip(1)
-        .map(|line| line.strip_prefix('*').unwrap_or(line).to_string())
-        .filter(|name| !name.trim().is_empty())
-        .collect()
-}
-
-/// Whether `networksetup -getdnsservers` output lists exactly the gatekeeper.
-fn points_at_gatekeeper(servers: &str) -> bool {
-    servers.trim() == "127.0.0.1"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `lsof -nP -iUDP:53 -iTCP:53 -F pcn` as root, on a Mac where launchd and Phylode hold
-    /// port 53, mDNSResponder has asked the router something, and another account's program
-    /// sits on 127.0.0.1:53.
-    const LISTING: &str = "p1\nclaunchd\nf20\nn*:53\nf21\nn*:53\n\
-                           p412\ncphylode\nf3\nn*:53\nf4\nn*:53\nf9\nn[::1]:53->[::1]:61022\n\
-                           p300\ncmDNSResponder\nf9\nn192.168.0.192:61000->192.168.0.1:53\n\
-                           p900\ncimpostor\nf3\nn127.0.0.1:53\n";
-
-    /// Should change: every process with its own end on the port is found, once each.
-    /// Should not change: a connection this Mac made to another machine's port 53 is not
-    /// holding it, and port 53 does not match 153 or 5353.
-    #[test]
-    fn the_programs_holding_a_port_are_read_from_lsof() {
-        let found: Vec<u32> = holders(LISTING, 53)
-            .into_iter()
-            .map(|(pid, _)| pid)
-            .collect();
-        assert_eq!(found, [1, 412, 900]);
-        assert_eq!(holders(LISTING, 53)[2].1, "impostor");
-        assert!(holders("p7\ncx\nf1\nn*:153\nf2\nn*:5353\n", 53).is_empty());
-        assert!(holders("", 53).is_empty());
-    }
-
-    #[test]
-    fn a_running_jobs_process_id_is_read_from_launchctl() {
-        let printed = "system/com.Phylode.gatekeeper = {\n\tactive count = 1\n\tstate = running\n\
-                       \tpid = 412\n\tsockets = {\n\t\tpid = 9\n\t}\n}\n";
-        assert_eq!(job_pid(printed), Some(412));
-        assert_eq!(job_pid("system/x = {\n\tstate = not running\n}\n"), None);
-    }
-
-    /// Should change: anyone besides launchd and the job holding the port is named, and so is
-    /// a port the job does not hold at all.
-    /// Should not change: launchd and the job together are fine.
-    #[test]
-    fn only_launchd_and_the_job_may_hold_the_port() {
-        let ours = [(1, "launchd".to_string()), (412, "phylode".to_string())];
-        assert_eq!(others_on_port(&ours, Some(412)), Ok(()));
-
-        let taken = holders(LISTING, 53);
-        assert_eq!(
-            others_on_port(&taken, Some(412)),
-            Err("impostor (process 900)".to_string())
-        );
-
-        let squatter = [(900, "impostor".to_string())];
-        assert_eq!(
-            others_on_port(&squatter, None),
-            Err("impostor (process 900)".to_string())
-        );
-        assert_eq!(
-            others_on_port(&[(1, "launchd".to_string())], Some(412)),
-            Err("no program Phylode started".to_string())
-        );
-    }
-
-    /// Should change: what `networksetup -getdnsservers` printed becomes addresses, or
-    /// `empty` for its "none set" sentence; a saved file round-trips.
-    /// Should not change: anything that is not an address is never kept, so a tampered file
-    /// cannot slip other arguments to `networksetup`.
     /// Should change: a file being replaced is swapped for a new one, so whoever already has
     /// the old one open (bash running the updater) keeps reading the old contents whole.
     /// Should not change: the path ends up with the new contents and the requested mode, and
@@ -1193,153 +655,6 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o755);
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn dns_servers_from_before_are_saved_and_read_back() {
-        assert_eq!(
-            dns_servers("192.0.2.53\n2001:db8::53\n"),
-            "192.0.2.53 2001:db8::53"
-        );
-        assert_eq!(
-            dns_servers("There aren't any DNS Servers set on Wi-Fi.\n"),
-            "empty"
-        );
-
-        let path = std::env::temp_dir().join(format!("phylode-dns-{}", std::process::id()));
-        let mut saved = std::collections::BTreeMap::new();
-        saved.insert("Wi-Fi".to_string(), "192.0.2.53 198.51.100.53".to_string());
-        saved.insert(" USB LAN ".to_string(), "empty".to_string());
-        let text: String = saved
-            .iter()
-            .map(|(service, servers)| format!("{service}\t{servers}\n"))
-            .collect();
-        std::fs::write(&path, format!("{text}Ethernet\t-setairportpower on\n")).unwrap();
-        assert_eq!(read_saved_dns(&path), saved);
-        let _ = std::fs::remove_file(&path);
-        assert!(read_saved_dns(&path).is_empty());
-    }
-
-    /// Should change: a service name keeps spaces at either end, or `networksetup` cannot find
-    /// it again.
-    /// Should not change: the notice line is skipped and a disabled service loses its `*`.
-    #[test]
-    fn network_service_names_are_kept_exactly() {
-        let output = "An asterisk (*) denotes that a network service is disabled.\nWi-Fi\n*Thunderbolt Bridge\n USB LAN \n\n";
-        assert_eq!(
-            parse_network_services(output),
-            ["Wi-Fi", "Thunderbolt Bridge", " USB LAN "]
-        );
-    }
-
-    #[test]
-    fn the_next_id_is_free_for_both_accounts_and_groups() {
-        let users = "_www 70\n_modelmanagerd 301\n_taken 499\nroot 0\njohn 501\n";
-        let groups = "admin 80\n_also 498\nstaff 20\n";
-        assert_eq!(next_system_id(users, groups), Some(497));
-    }
-
-    /// Should change: the folder holding a symbolic link on the written path is checked, not
-    /// only the folder the link resolves to.
-    /// Should not change: the resolved folder and its ancestors are still checked.
-    #[test]
-    fn the_folder_holding_a_link_on_the_path_is_checked_too() {
-        let base = std::env::temp_dir().join(format!("phylode-link-{}", std::process::id()));
-        let holder = base.join("holder");
-        let target = base.join("target");
-        fs::create_dir_all(&holder).unwrap();
-        fs::create_dir_all(&target).unwrap();
-        let link = holder.join("bin");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        let folders = folders_to_check(&link).unwrap();
-        assert!(folders.contains(&holder), "the folder holding the link");
-        let real_target = fs::canonicalize(&target).unwrap();
-        assert!(
-            folders.contains(&real_target),
-            "the folder the link resolves to"
-        );
-        assert!(folders.contains(real_target.parent().unwrap()));
-        assert!(folders.contains(Path::new("/")));
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    /// Should change: an access control entry granting a standard account or group change
-    /// rights is caught, including one inherited or meant only for folders created inside.
-    /// Should not change: no entries, deny entries, read-only grants, and grants to root or
-    /// the admin group pass. Listings follow the format `ls -lde` prints on macOS.
-    #[test]
-    fn access_control_entries_that_let_others_write_are_caught() {
-        let header = "drwxr-xr-x  3 root  wheel  96 Aug  8 15:25 /usr/local/bin\n";
-        let with = |entries: &str| format!("{header}{entries}");
-
-        for unsafe_entries in [
-            " 0: group:staff allow add_file,add_subdirectory,delete_child\n",
-            " 0: group:everyone deny delete\n 1: user:alex allow write\n",
-            " 0: group:staff inherited allow add_file\n",
-            " 0: group:everyone allow add_file,directory_inherit,only_inherit\n",
-        ] {
-            assert!(
-                acl_lets_others_write(&with(unsafe_entries)),
-                "{unsafe_entries}"
-            );
-        }
-        for safe_entries in [
-            "",
-            " 0: group:everyone deny delete\n",
-            " 0: group:staff allow list,search,readattr,readextattr,readsecurity\n",
-            " 0: group:admin allow add_file,add_subdirectory,delete_child\n",
-        ] {
-            assert!(
-                !acl_lets_others_write(&with(safe_entries)),
-                "{safe_entries}"
-            );
-        }
-    }
-
-    /// Should change: a folder any account, or an unrelated group, can write is refused, and
-    /// one owned by an ordinary account needs that account checked.
-    /// Should not change: root-owned folders, including admin-group-writable ones such as
-    /// the list folder install itself creates, pass without a lookup.
-    #[test]
-    fn only_root_and_administrators_may_be_able_to_change_an_install_folder() {
-        let admin = 80;
-        assert_eq!(writers(0, 0, 0o755, admin), Writers::RootOrAdministrators);
-        assert_eq!(
-            writers(0, admin, 0o775, admin),
-            Writers::RootOrAdministrators
-        );
-        assert_eq!(writers(501, 20, 0o755, admin), Writers::Owner(501));
-        assert_eq!(writers(0, 0, 0o777, admin), Writers::Anyone);
-        assert_eq!(writers(0, 20, 0o775, admin), Writers::Anyone);
-    }
-
-    #[test]
-    fn no_id_is_offered_once_the_system_range_is_full() {
-        let full: String = (400..500).map(|id| format!("_a{id} {id}\n")).collect();
-        assert_eq!(next_system_id(&full, ""), None);
-        assert_eq!(next_system_id("", ""), Some(499));
-    }
-
-    #[test]
-    fn network_services_skip_the_notice_and_keep_spaces_and_disabled_ones() {
-        let output = "An asterisk (*) denotes that a network service is disabled.\n\
-                      Wi-Fi\n\
-                      USB 10/100/1000 LAN\n\
-                      *Thunderbolt Bridge\n";
-        assert_eq!(
-            parse_network_services(output),
-            ["Wi-Fi", "USB 10/100/1000 LAN", "Thunderbolt Bridge"]
-        );
-    }
-
-    #[test]
-    fn only_a_service_pointing_solely_at_the_gatekeeper_counts_as_ours() {
-        assert!(points_at_gatekeeper("127.0.0.1\n"));
-        assert!(!points_at_gatekeeper(
-            "There aren't any DNS Servers set on Wi-Fi.\n"
-        ));
-        assert!(!points_at_gatekeeper("127.0.0.1\n1.1.1.1\n"));
     }
 
     #[test]
