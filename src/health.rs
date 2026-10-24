@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn it_does_not_panic_without_a_journal() {
-        // On a run where the journal could not be opened (main.rs prints a warning), the
+        // On a run where the journal could not be opened (the service prints a warning), the
         // restart path must still complete.
         record_unresponsive(None, "test");
     }
