@@ -75,6 +75,15 @@ pub struct Checked {
     pub signature: Signature,
 }
 
+/// Whether the upstream validates signatures before answering (the CD flag, RFC 4035 §3.2.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Checking {
+    /// CD clear: the upstream validates, and answers SERVFAIL when validation fails.
+    Enabled,
+    /// CD set: the upstream returns the answer as-is.
+    Disabled,
+}
+
 /// An encrypted channel to one upstream resolver.
 ///
 /// This sends hand-built queries through hickory's `NameServerPool` rather than its high-level
@@ -148,14 +157,14 @@ impl Exchange {
     /// [`Answer::ServerFailure`]. Neither counts as a failure for this upstream, or two
     /// queries for one badly signed domain would demote a perfectly healthy server.
     pub async fn query(&self, query: &Query) -> Result<Checked, ExchangeError> {
-        let first = self.send(query, false).await;
+        let first = self.send(query, Checking::Enabled).await;
         if !is_server_failure(&first) {
             return self.classify(first).map(|answer| Checked {
                 answer,
                 signature: Signature::NotFlagged,
             });
         }
-        let retried = self.send(query, true).await;
+        let retried = self.send(query, Checking::Disabled).await;
         if is_server_failure(&retried) {
             return Ok(Checked {
                 answer: Answer::ServerFailure,
@@ -168,13 +177,13 @@ impl Exchange {
         })
     }
 
-    /// Sends one query. With `checking_disabled` true, the CD flag asks the upstream not to
+    /// Sends one query. With `Checking::Disabled`, the CD flag asks the upstream not to
     /// validate signatures and to return the answer as-is.
     ///
     /// What breaks if you change it: names must go through `from_utf8`, which converts
     /// non-ASCII domains to their `xn--` punycode form. Switching to `from_ascii` makes every
     /// internationalized domain fail — and those failures get counted against the upstream.
-    async fn send(&self, query: &Query, checking_disabled: bool) -> Result<DnsResponse, NetError> {
+    async fn send(&self, query: &Query, checking: Checking) -> Result<DnsResponse, NetError> {
         let name = WireName::from_utf8(format!("{}.", query.name()))
             .map_err(|_| NetError::from("query name is not a valid domain"))?;
         let mut message = Message::query();
@@ -183,7 +192,7 @@ impl Exchange {
             wire_record_type(query.record_type()),
         ));
         message.metadata.recursion_desired = true;
-        message.metadata.checking_disabled = checking_disabled;
+        message.metadata.checking_disabled = checking == Checking::Disabled;
         message.set_edns(signatures_requested());
         let request = DnsRequest::new(message, DnsRequestOptions::default());
         match self.pool.send(request).next().await {

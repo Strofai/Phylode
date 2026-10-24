@@ -36,6 +36,15 @@ enum CacheWrite {
     Forbidden,
 }
 
+/// Which per-device rate limit a request counts against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Allowance {
+    /// The limit every query counts against.
+    Ordinary,
+    /// The separate limit for the Apple hosts that are always allowed (captive and push).
+    AppleService,
+}
+
 /// The gatekeeper itself.
 #[derive(Debug)]
 pub struct Gatekeeper {
@@ -240,8 +249,8 @@ impl Gatekeeper {
     }
 
     /// Whether `client` gets any response, counting this request against its rate limit.
-    /// `apple_service` counts the request against the Apple allowance instead of the ordinary
-    /// one; it does not exempt it from the served networks.
+    /// `allowance` picks which of the two limits the request counts against; neither exempts it
+    /// from the served networks.
     ///
     /// A device outside the served networks is not one of the devices this is for: it is not
     /// journalled, and only its first request is recorded as an event. A device querying too
@@ -252,17 +261,16 @@ impl Gatekeeper {
     /// used up its ordinary allowance (and source addresses on a LAN can be forged) could not
     /// reach captive/push and falls back to an unfiltered resolver. Exempting Apple's hosts
     /// altogether instead lets any device send made-up names under `push.apple.com` without end.
-    fn admit(&self, client: IpAddr, apple_service: bool) -> bool {
+    fn admit(&self, client: IpAddr, allowance: Allowance) -> bool {
         if let Admit::No { first } = self.served.admit(client) {
             if first && let Some(journal) = self.journal.as_ref() {
                 journal.event(EventKind::OutsideClient, client.to_string());
             }
             return false;
         }
-        let (limit, kind) = if apple_service {
-            (&self.apple_rate_limit, "queries for Apple's services")
-        } else {
-            (&self.rate_limit, "queries")
+        let (limit, kind) = match allowance {
+            Allowance::AppleService => (&self.apple_rate_limit, "queries for Apple's services"),
+            Allowance::Ordinary => (&self.rate_limit, "queries"),
         };
         if let Admit::No { first } = limit.check(client, Instant::now()) {
             if first && let Some(journal) = self.journal.as_ref() {
@@ -386,7 +394,12 @@ impl Responder for Gatekeeper {
             };
         }
 
-        if !self.admit(client, Allowlist::hard_allows(query.name().as_str())) {
+        let allowance = if Allowlist::hard_allows(query.name().as_str()) {
+            Allowance::AppleService
+        } else {
+            Allowance::Ordinary
+        };
+        if !self.admit(client, allowance) {
             return Response::Ignored;
         }
 
@@ -470,7 +483,7 @@ impl Responder for Gatekeeper {
     }
 
     fn admits(&self, client: IpAddr) -> bool {
-        self.admit(client.to_canonical(), false)
+        self.admit(client.to_canonical(), Allowance::Ordinary)
     }
 }
 
@@ -848,10 +861,25 @@ mod tests {
         blocklist.load_from_str("evil.net\n");
         let (gatekeeper, cache) = parts(blocklist);
         let device: IpAddr = "192.168.0.20".parse().unwrap();
-        for (name, target, https, blocked) in [
-            ("shop.example.com", "tracker.evil.net.", true, true),
-            ("api.example.com", "tracker.evil.net.", false, true),
-            ("www.example.com", ".", true, false),
+        for (name, target, kind, blocked) in [
+            (
+                "shop.example.com",
+                "tracker.evil.net.",
+                crate::dns::ServiceBinding::Https,
+                true,
+            ),
+            (
+                "api.example.com",
+                "tracker.evil.net.",
+                crate::dns::ServiceBinding::Svcb,
+                true,
+            ),
+            (
+                "www.example.com",
+                ".",
+                crate::dns::ServiceBinding::Https,
+                false,
+            ),
         ] {
             let asked = Query::new(crate::dns::Name::parse(name), RecordType::Https);
             cache.insert(
@@ -859,7 +887,7 @@ mod tests {
                 Cached::Records(crate::dns::Records::with_service_binding(
                     asked.name(),
                     target,
-                    https,
+                    kind,
                 )),
             );
             let response = gatekeeper.respond(&asked, device).await;

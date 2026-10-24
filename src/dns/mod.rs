@@ -187,6 +187,21 @@ fn is_signature_evidence(record_type: WireRecordType) -> bool {
     )
 }
 
+/// Whether a device's query asked for signatures (the DO bit, RFC 3225).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signatures {
+    Requested,
+    NotRequested,
+}
+
+/// Test only: which kind of service binding record [`Records::with_service_binding`] builds.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceBinding {
+    Https,
+    Svcb,
+}
+
 /// The authority section an upstream sent with its answer, kept so a device that validates
 /// signatures can check it: for a negative answer the zone's SOA and the NSEC/NSEC3 records
 /// proving the name or type does not exist, for a wildcard answer the proof that no closer
@@ -401,11 +416,11 @@ impl Records {
         Self::answers_only(records)
     }
 
-    /// Test only: an HTTPS (or, with `https` false, SVCB) record for `name` sending devices
+    /// Test only: an HTTPS or SVCB record for `name` sending devices
     /// to `target` (`.` for the name itself) with a public `ipv4hint` — the shape of
     /// cloaking through service binding.
     #[cfg(test)]
-    pub fn with_service_binding(name: &Name, target: &str, https: bool) -> Self {
+    pub fn with_service_binding(name: &Name, target: &str, kind: ServiceBinding) -> Self {
         use hickory_proto::rr::rdata::svcb::{IpHint, SVCB, SvcParamKey, SvcParamValue};
         use hickory_proto::rr::rdata::{A, HTTPS};
 
@@ -417,10 +432,9 @@ impl Records {
             target.parse().expect("test names should parse"),
             vec![(SvcParamKey::Ipv4Hint, hint)],
         );
-        let data = if https {
-            RData::HTTPS(HTTPS(svcb))
-        } else {
-            RData::SVCB(svcb)
+        let data = match kind {
+            ServiceBinding::Https => RData::HTTPS(HTTPS(svcb)),
+            ServiceBinding::Svcb => RData::SVCB(svcb),
         };
         Self::answers_only(vec![Record::from_rdata(owner, 300, data)])
     }
@@ -467,8 +481,12 @@ impl Records {
     /// gets everything the upstream sent; any other gets the answer without signatures or
     /// proofs (unless it asked for that type) and no authority section, exactly as before
     /// signatures were kept.
-    fn for_device(&self, signatures: bool, asked: WireRecordType) -> (Vec<Record>, Vec<Record>) {
-        if signatures {
+    fn for_device(
+        &self,
+        signatures: Signatures,
+        asked: WireRecordType,
+    ) -> (Vec<Record>, Vec<Record>) {
+        if signatures == Signatures::Requested {
             return (self.answers.clone(), self.proof.as_wire().to_vec());
         }
         let answers = self
@@ -581,15 +599,15 @@ mod tests {
             records.iter().map(Record::record_type).collect()
         };
 
-        let (answers, authority) = records.for_device(true, WireRecordType::A);
+        let (answers, authority) = records.for_device(Signatures::Requested, WireRecordType::A);
         assert_eq!(kinds(&answers), [WireRecordType::A, WireRecordType::RRSIG]);
         assert_eq!(kinds(&authority), [WireRecordType::NSEC]);
 
-        let (answers, authority) = records.for_device(false, WireRecordType::A);
+        let (answers, authority) = records.for_device(Signatures::NotRequested, WireRecordType::A);
         assert_eq!(kinds(&answers), [WireRecordType::A]);
         assert!(authority.is_empty());
 
-        let (answers, _) = records.for_device(false, WireRecordType::RRSIG);
+        let (answers, _) = records.for_device(Signatures::NotRequested, WireRecordType::RRSIG);
         assert_eq!(kinds(&answers), [WireRecordType::A, WireRecordType::RRSIG]);
     }
 
@@ -698,8 +716,8 @@ mod tests {
         );
     }
 
-    fn service_binding(target: &str, https: bool) -> Records {
-        Records::with_service_binding(&Name::parse("shop.example.com"), target, https)
+    fn service_binding(target: &str, kind: ServiceBinding) -> Records {
+        Records::with_service_binding(&Name::parse("shop.example.com"), target, kind)
     }
 
     /// Should change: the endpoint an HTTPS or SVCB record points at is an alias target.
@@ -707,14 +725,18 @@ mod tests {
     #[test]
     fn service_binding_targets_are_alias_targets() {
         assert_eq!(
-            service_binding("Tracker.Evil.NET.", true).alias_targets(),
+            service_binding("Tracker.Evil.NET.", ServiceBinding::Https).alias_targets(),
             vec!["tracker.evil.net".to_string()]
         );
         assert_eq!(
-            service_binding("tracker.evil.net.", false).alias_targets(),
+            service_binding("tracker.evil.net.", ServiceBinding::Svcb).alias_targets(),
             vec!["tracker.evil.net".to_string()]
         );
-        assert!(service_binding(".", true).alias_targets().is_empty());
+        assert!(
+            service_binding(".", ServiceBinding::Https)
+                .alias_targets()
+                .is_empty()
+        );
     }
 
     /// Should change: a TTL above a day is cut to a day.
