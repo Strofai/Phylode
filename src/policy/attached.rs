@@ -79,7 +79,10 @@ impl AttachedNetworks {
         };
         self.read_from(&store);
         let _ = ready.send(true);
-        #[allow(unsafe_code)]
+        #[allow(
+            unsafe_code,
+            reason = "the run loop mode is a CoreFoundation constant, readable only through unsafe"
+        )]
         // SAFETY: reads an immutable constant CoreFoundation exports; it is set before any
         // Rust code runs and never written again.
         let mode = unsafe { kCFRunLoopDefaultMode };
@@ -218,7 +221,10 @@ fn values(dictionary: &CFDictionary, key: &'static str) -> impl Iterator<Item = 
 
 /// A reference of our own to an element of a CoreFoundation dictionary or array, typed as
 /// "any CoreFoundation object" so it can only be used after a checked downcast.
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "core-foundation hands out container elements only as raw pointers"
+)]
 fn retained(element: ItemRef<'_, *const c_void>) -> CFType {
     // SAFETY: an `ItemRef` only comes out of a CoreFoundation container that is still alive,
     // so the pointer is a valid CoreFoundation object; the get rule takes a retain of our own,

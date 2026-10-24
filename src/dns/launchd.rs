@@ -46,7 +46,10 @@ pub fn take_sockets(name: &str) -> Result<Vec<RawFd>, LaunchdError> {
 /// nothing else has adopted. Callers only pass values returned by [`take_sockets`], which
 /// yields each descriptor exactly once (launchd returns `AlreadyActivated` on a second call
 /// for the same name), so ownership is unique.
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "adopting a launchd descriptor is what lets the service bind port 53 without root"
+)]
 pub fn adopt_udp(fd: RawFd) -> Result<StdUdpSocket, LaunchdError> {
     // SAFETY: see the # Safety section above — the fd comes from launchd, ownership is
     // unique, and nothing has adopted it.
@@ -59,7 +62,10 @@ pub fn adopt_udp(fd: RawFd) -> Result<StdUdpSocket, LaunchdError> {
 
 /// Adopts a descriptor from launchd as a TCP listener. Same safety requirements as
 /// [`adopt_udp`].
-#[allow(unsafe_code)]
+#[allow(
+    unsafe_code,
+    reason = "adopting a launchd descriptor is what lets the service bind port 53 without root"
+)]
 pub fn adopt_tcp(fd: RawFd) -> Result<StdTcpListener, LaunchdError> {
     // SAFETY: see the # Safety section on [`adopt_udp`]; the requirements are identical.
     let listener = unsafe { StdTcpListener::from_raw_fd(fd) };
