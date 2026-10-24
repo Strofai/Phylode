@@ -254,23 +254,23 @@ impl EventKind {
 /// One service event.
 #[derive(Clone, Debug)]
 pub struct Event {
-    pub at: SystemTime,
-    pub kind: EventKind,
+    at: SystemTime,
+    kind: EventKind,
     /// Human-readable detail.
-    pub detail: String,
+    detail: String,
 }
 
 /// One query to be journalled.
 #[derive(Clone, Debug)]
 pub struct Record {
-    pub at: SystemTime,
-    pub client: IpAddr,
-    pub name: String,
-    pub record_type: Cow<'static, str>,
-    pub disposition: Disposition,
+    pub(crate) at: SystemTime,
+    pub(crate) client: IpAddr,
+    pub(crate) name: String,
+    pub(crate) record_type: Cow<'static, str>,
+    pub(crate) disposition: Disposition,
     /// Why it was handled that way — for instance, which list matched. Empty when there is
     /// no reason to give.
-    pub reason: Cow<'static, str>,
+    pub(crate) reason: Cow<'static, str>,
 }
 
 /// The reason written for a query answered because the user allowed it with `phylode allow`.

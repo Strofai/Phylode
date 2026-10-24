@@ -71,8 +71,8 @@ pub enum Signature {
 /// An upstream answer, plus whether the upstream flagged its signature.
 #[derive(Clone, Debug)]
 pub struct Checked {
-    pub answer: Answer,
-    pub signature: Signature,
+    pub(crate) answer: Answer,
+    pub(crate) signature: Signature,
 }
 
 /// Whether the upstream validates signatures before answering (the CD flag, RFC 4035 §3.2.2).

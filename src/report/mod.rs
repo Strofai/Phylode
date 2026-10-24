@@ -62,42 +62,42 @@ enum Detail {
 /// A summary over a span of days.
 #[derive(Debug, Default)]
 pub struct Summary {
-    pub days: Vec<String>,
-    pub total_queries: u64,
-    pub blocked: u64,
-    pub blocked_by_client: HashMap<String, u64>,
-    pub top_blocked: Vec<(String, u64)>,
-    pub queries_by_client: HashMap<String, u64>,
-    pub repeat_offenders: Vec<(String, String, u64)>,
-    pub fail_open_queries: u64,
-    pub failed_queries: u64,
+    days: Vec<String>,
+    total_queries: u64,
+    blocked: u64,
+    blocked_by_client: HashMap<String, u64>,
+    top_blocked: Vec<(String, u64)>,
+    queries_by_client: HashMap<String, u64>,
+    repeat_offenders: Vec<(String, String, u64)>,
+    fail_open_queries: u64,
+    failed_queries: u64,
     /// Times the in-flight upstream limit was full, so the query was neither sent nor
     /// served from cache. Should normally be 0.
-    pub overloaded_queries: u64,
+    overloaded_queries: u64,
     /// Times an answer pointed into the local network and the whole response was dropped
     /// (DNS rebinding defence).
-    pub rebind_blocked: u64,
+    rebind_blocked: u64,
     /// Times an upstream signature failed to validate and the answer was refused, plus the
     /// domains involved.
-    pub dnssec_bogus: u64,
-    pub dnssec_bogus_by_domain: HashMap<String, u64>,
+    dnssec_bogus: u64,
+    dnssec_bogus_by_domain: HashMap<String, u64>,
     /// Times an upstream answered but answered with a failure. The upstream is fine —
     /// usually the domain's own authoritative servers are broken.
-    pub servfail_queries: u64,
+    servfail_queries: u64,
     /// Which domains those answers came from.
-    pub rebind_by_domain: HashMap<String, u64>,
+    rebind_by_domain: HashMap<String, u64>,
     /// Queries answered only because the user allowed the domain with `phylode allow`, by
     /// domain. Apple's hard rules are not counted.
-    pub user_allowed_by_domain: HashMap<String, u64>,
-    pub events: Vec<(String, String, String)>,
-    pub unreadable_files: Vec<String>,
+    user_allowed_by_domain: HashMap<String, u64>,
+    events: Vec<(String, String, String)>,
+    unreadable_files: Vec<String>,
     /// Whether a table reached [`MAX_TRACKED`] names, so later names went uncounted in it.
     /// The totals still count every line.
-    pub truncated: bool,
+    truncated: bool,
     /// Whether the journal held lookups whose domain the `journal` setting left out.
-    pub hidden_domains: bool,
+    hidden_domains: bool,
     /// Whether the journal held lookups whose device the `journal` setting left out.
-    pub hidden_devices: bool,
+    hidden_devices: bool,
 }
 
 impl Summary {
