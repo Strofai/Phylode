@@ -17,7 +17,7 @@ use hickory_server::net::xfer::Protocol;
 use hickory_server::server::{Request, ResponseHandler, ResponseInfo};
 use hickory_server::zone_handler::MessageResponse;
 
-use super::{Handler, send};
+use super::handler::{Handler, send};
 use crate::dns::{Query, Responder, Response};
 
 /// Uses the packet's last byte to pick which response the responder returns and whether the
