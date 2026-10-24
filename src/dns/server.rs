@@ -29,7 +29,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 
 use super::launchd::{self, LaunchdError};
-use super::{Name, Query, RecordType, Responder, Response};
+use super::{Name, Query, RecordType, Responder, Response, Signatures};
 
 #[cfg(fuzzing)]
 pub mod fuzz;
@@ -599,10 +599,15 @@ async fn send<H: ResponseHandler>(
     let edns = request.edns.as_ref().map(reply_edns);
     // Whether the device asked for signatures: only then do they, and the upstream's proofs,
     // go out (RFC 4035 §3.2.1).
-    let signatures = request
+    let signatures = if request
         .edns
         .as_ref()
-        .is_some_and(|edns| edns.flags().dnssec_ok);
+        .is_some_and(|edns| edns.flags().dnssec_ok)
+    {
+        Signatures::Requested
+    } else {
+        Signatures::NotRequested
+    };
     let mut builder = MessageResponseBuilder::from_message_request(request);
     if let Some(edns) = &edns {
         builder.edns(edns);
@@ -648,7 +653,7 @@ async fn send<H: ResponseHandler>(
             // caching on and will mostly just keep asking. A device that validates signatures
             // gets the upstream's own SOA and proof instead: one made up here is unsigned, and
             // proves nothing to it.
-            let authority = if signatures && !proof.as_wire().is_empty() {
+            let authority = if signatures == Signatures::Requested && !proof.as_wire().is_empty() {
                 proof.as_wire().to_vec()
             } else {
                 vec![negative_soa(&name, ttl)]
@@ -1119,13 +1124,13 @@ mod tests {
         server: SocketAddr,
         name: &str,
         kind: WireRecordType,
-        dnssec: bool,
+        signatures: Signatures,
     ) -> Message {
         let mut query = Message::query();
         query.add_query(WireQuery::query(name.parse().unwrap(), kind));
         let mut edns = Edns::new();
         edns.set_max_payload(1232);
-        edns.set_dnssec_ok(dnssec);
+        edns.set_dnssec_ok(signatures == Signatures::Requested);
         query.set_edns(edns);
         let reply = udp_ask(server, &query.to_vec().unwrap()).await.unwrap();
         Message::from_vec(&reply).unwrap()
@@ -1142,26 +1147,50 @@ mod tests {
         let server = udp_server(Arc::new(Signed)).await;
         let dnssec_ok = |reply: &Message| reply.edns.as_ref().map(|edns| edns.flags().dnssec_ok);
 
-        let signed = ask_signed(server, "www.example.com.", WireRecordType::A, true).await;
+        let signed = ask_signed(
+            server,
+            "www.example.com.",
+            WireRecordType::A,
+            Signatures::Requested,
+        )
+        .await;
         let kinds: Vec<_> = signed.answers.iter().map(Record::record_type).collect();
         assert_eq!(kinds, [WireRecordType::A, WireRecordType::RRSIG]);
         assert_eq!(signed.authorities.len(), 1);
         assert_eq!(signed.authorities[0].record_type(), WireRecordType::NSEC);
         assert_eq!(dnssec_ok(&signed), Some(true));
 
-        let plain = ask_signed(server, "www.example.com.", WireRecordType::A, false).await;
+        let plain = ask_signed(
+            server,
+            "www.example.com.",
+            WireRecordType::A,
+            Signatures::NotRequested,
+        )
+        .await;
         let kinds: Vec<_> = plain.answers.iter().map(Record::record_type).collect();
         assert_eq!(kinds, [WireRecordType::A]);
         assert!(plain.authorities.is_empty());
         assert_eq!(dnssec_ok(&plain), Some(false));
 
-        let proven = ask_signed(server, "gone.example.com.", WireRecordType::AAAA, true).await;
+        let proven = ask_signed(
+            server,
+            "gone.example.com.",
+            WireRecordType::AAAA,
+            Signatures::Requested,
+        )
+        .await;
         assert_eq!(proven.metadata.response_code, ResponseCode::NXDomain);
         let kinds: Vec<_> = proven.authorities.iter().map(Record::record_type).collect();
         assert_eq!(kinds, [WireRecordType::SOA, WireRecordType::RRSIG]);
         assert_eq!(proven.authorities[0].name.to_ascii(), "example.com.");
 
-        let unproven = ask_signed(server, "gone.example.com.", WireRecordType::AAAA, false).await;
+        let unproven = ask_signed(
+            server,
+            "gone.example.com.",
+            WireRecordType::AAAA,
+            Signatures::NotRequested,
+        )
+        .await;
         assert_eq!(unproven.metadata.response_code, ResponseCode::NXDomain);
         assert_eq!(unproven.authorities.len(), 1);
         assert_eq!(unproven.authorities[0].name.to_ascii(), "gone.example.com.");
