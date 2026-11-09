@@ -1,5 +1,3 @@
-**English** · [繁體中文](README.zh-TW.md)
-
 # Phylode
 
 **Every device on your network, protected by one Mac.**
