@@ -1,5 +1,3 @@
-**English** · [繁體中文](network-setup.zh-TW.md)
-
 # Set up your network for Phylode
 
 Phylode protects a device only when that device asks your Mac to look up websites. This
