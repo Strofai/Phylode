@@ -33,7 +33,8 @@
 rebinding defence | `cache/` bounded answer cache | `journal/` query and event journal |
 `report/` weekly summary | `config/` first-party parser | `cli/` commands |
 `install/` sets the boot service up and removes it |
-`gatekeeper.rs` the single seam between the layers.
+`gatekeeper.rs` the single seam between the layers. It stays one file on purpose: all of
+its non-test code does that one job, so splitting it would only scatter the seam.
 
 ## Encode rules in types, not in comments
 
